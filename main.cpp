@@ -143,20 +143,32 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     return true;
 }
 
-// Generate Large Organic 3D Mountain Valley Wall Mesh with Rock & Greenery Coloring
+// Generate Large Organic 3D Mountain Valley Wall Mesh with Realistic Sandstone Strata & Lighting Shading
 Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
     const int width = 128;
     const int height = 256;
 
-    // Generate base Perlin noise heightmap
-    Image perlinImg = GenImagePerlinNoise(width, height, isLeftSide ? 0 : 500, 0, 3.5f);
-    Color* pixels = LoadImageColors(perlinImg);
+    // Generate multi-octave Perlin noise heightmaps for rugged fractal mountain peaks
+    Image perlin1 = GenImagePerlinNoise(width, height, isLeftSide ? 0 : 500, 0, 3.5f);
+    Image perlin2 = GenImagePerlinNoise(width, height, isLeftSide ? 250 : 750, 100, 8.0f);
+    Image perlin3 = GenImagePerlinNoise(width, height, isLeftSide ? 400 : 900, 200, 18.0f);
+
+    Color* pix1 = LoadImageColors(perlin1);
+    Color* pix2 = LoadImageColors(perlin2);
+    Color* pix3 = LoadImageColors(perlin3);
+
+    Color* pixels = (Color*)RL_MALLOC(width * height * sizeof(Color));
 
     // Sculpt natural canyon cliff profile (road-facing inner edge u=0 has zero height, outer peak edge u=1 has max height)
     for (int z = 0; z < height; z++) {
         for (int x = 0; x < width; x++) {
             int idx = z * width + x;
-            float rawVal = (float)pixels[idx].r / 255.0f;
+            float n1 = (float)pix1[idx].r / 255.0f;
+            float n2 = (float)pix2[idx].r / 255.0f;
+            float n3 = (float)pix3[idx].r / 255.0f;
+
+            // Multi-fractal noise synthesis
+            float rawVal = n1 * 0.60f + n2 * 0.28f + n3 * 0.12f;
 
             // u = 0 for road-facing inner edge, u = 1 for outer mountain peak edge
             float normX = (float)x / (float)(width - 1);
@@ -166,7 +178,7 @@ Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
             float heightSlope = powf(u, 1.8f);
             float finalFactor = rawVal * heightSlope;
 
-            // Explicitly force the first ~25% (u < 0.25) to remain flat/low
+            // Explicitly force the first ~25% (u < 0.25) to remain flat/low at ground level
             if (u < 0.25f) {
                 finalFactor *= (u / 0.25f);
             }
@@ -175,6 +187,13 @@ Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
             pixels[idx] = (Color){ hVal, hVal, hVal, 255 };
         }
     }
+
+    UnloadImageColors(pix1);
+    UnloadImageColors(pix2);
+    UnloadImageColors(pix3);
+    UnloadImage(perlin1);
+    UnloadImage(perlin2);
+    UnloadImage(perlin3);
 
     Image customHeightmap = {
         .data = pixels,
@@ -185,30 +204,64 @@ Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
     };
 
     Mesh mesh = GenMeshHeightmap(customHeightmap, size);
-    UnloadImageColors(pixels);
+    UnloadImage(customHeightmap); // Unload calls RL_FREE on pixels
 
-    // Apply organic mountain rock & alpine greenery color map to vertices
-    if (mesh.colors != nullptr) {
+    // Apply realistic sandstone geological strata coloring & directional sun lighting to vertices
+    if (mesh.colors != nullptr && mesh.vertices != nullptr) {
+        // Directional sun vector for canyon wall illumination
+        Vector3 sunDir = Vector3Normalize((Vector3){ -0.5f, 0.75f, -0.4f });
+
         for (int i = 0; i < mesh.vertexCount; i++) {
-            float y = mesh.vertices[i * 3 + 1];
-            float normY = Clamp(y / size.y, 0.0f, 1.0f);
+            float vx = mesh.vertices[i * 3 + 0];
+            float vy = mesh.vertices[i * 3 + 1];
+            float vz = mesh.vertices[i * 3 + 2];
 
-            Color vertexColor;
-            if (normY > 0.45f) {
-                // High mountain rock peaks with slate granite tone
-                vertexColor = (Color){ 105, 100, 95, 255 };
-            } else if (normY > 0.15f) {
-                // Mid-cliff ledges with moss and alpine greenery
-                vertexColor = (Color){ 45, 95, 52, 255 };
-            } else {
-                // Canyon base weathered sandstone rock
-                vertexColor = (Color){ 120, 108, 92, 255 };
+            // Extract vertex normal vector
+            Vector3 normal = { 0.0f, 1.0f, 0.0f };
+            if (mesh.normals != nullptr) {
+                normal = (Vector3){
+                    mesh.normals[i * 3 + 0],
+                    mesh.normals[i * 3 + 1],
+                    mesh.normals[i * 3 + 2]
+                };
             }
 
-            mesh.colors[i * 4 + 0] = vertexColor.r;
-            mesh.colors[i * 4 + 1] = vertexColor.g;
-            mesh.colors[i * 4 + 2] = vertexColor.b;
-            mesh.colors[i * 4 + 3] = vertexColor.a;
+            // Directional sun lighting factor
+            float diff = Vector3DotProduct(normal, sunDir);
+            float lightFactor = Clamp(diff * 0.55f + 0.45f, 0.25f, 1.0f);
+
+            // Geological sandstone strata layer calculation (horizontal wavy bands)
+            float strataWave = sinf(vy * 0.42f + vx * 0.05f + vz * 0.03f);
+
+            // Sandstone palette interpolation
+            Vector3 baseCol;
+            if (strataWave > 0.35f) {
+                // Bright Tan / Beige Sandstone Layer
+                baseCol = (Vector3){ 208.0f, 162.0f, 112.0f };
+            } else if (strataWave > -0.25f) {
+                // Rich Terracotta Red / Orange Sandstone Strata
+                baseCol = (Vector3){ 182.0f, 96.0f, 54.0f };
+            } else {
+                // Dark Weathered Brown Basalt / Iron Rock Layer
+                baseCol = (Vector3){ 98.0f, 58.0f, 38.0f };
+            }
+
+            // Slope shading: Sheer vertical cliffs receive darker crevice shadows
+            float slopeFactor = Clamp(normal.y, 0.0f, 1.0f);
+            if (slopeFactor < 0.45f) {
+                float crevice = (0.45f - slopeFactor) / 0.45f;
+                baseCol = Vector3Lerp(baseCol, (Vector3){ 48.0f, 30.0f, 20.0f }, crevice * 0.65f);
+            }
+
+            // Apply directional sun lighting
+            baseCol.x *= lightFactor;
+            baseCol.y *= lightFactor;
+            baseCol.z *= lightFactor;
+
+            mesh.colors[i * 4 + 0] = (unsigned char)Clamp(baseCol.x, 0.0f, 255.0f);
+            mesh.colors[i * 4 + 1] = (unsigned char)Clamp(baseCol.y, 0.0f, 255.0f);
+            mesh.colors[i * 4 + 2] = (unsigned char)Clamp(baseCol.z, 0.0f, 255.0f);
+            mesh.colors[i * 4 + 3] = 255;
         }
     }
 
@@ -300,6 +353,78 @@ void UnloadPlayerCharacter(PlayerCharacter& player) {
     }
 }
 
+// Helper function to render a colored 3D quad using Raylib rlgl
+void DrawQuad3D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, Color color) {
+    rlSetTexture(0);
+    rlBegin(RL_QUADS);
+        rlColor4ub(color.r, color.g, color.b, color.a);
+        rlVertex3f(p1.x, p1.y, p1.z);
+        rlVertex3f(p2.x, p2.y, p2.z);
+        rlVertex3f(p3.x, p3.y, p3.z);
+        rlVertex3f(p4.x, p4.y, p4.z);
+    rlEnd();
+}
+
+// Render Continuous Animated Canyon River & Sandy Banks (Parallel to road on RIGHT side: X = +8.0m to +13.5m)
+void DrawRiverAndBanks(float playerZ, float time) {
+    const float riverStartX = 8.0f;
+    const float riverWidth  = 5.5f;
+    const float riverEndX   = riverStartX + riverWidth; // +13.5m (well inside mountain exclusion zone +15.0m!)
+
+    // --- 1. Natural Sandy / Wet Riverbed Banks (X = +5.4m to +14.0m) ---
+    const float segLength = 6.0f;
+    int startSeg = (int)((playerZ - 40.0f) / segLength);
+    int endSeg   = (int)((playerZ + 240.0f) / segLength);
+
+    for (int i = startSeg; i <= endSeg; i++) {
+        float segZ = i * segLength + segLength / 2.0f;
+
+        // Sandy shore bank between road curb and river
+        Vector3 bankPos = { 6.7f, -0.2f, segZ };
+        DrawCube(bankPos, 2.6f, 0.5f, segLength, (Color){ 175, 140, 100, 255 });
+        DrawCubeWires(bankPos, 2.6f, 0.5f, segLength, (Color){ 140, 110, 75, 255 });
+
+        // Dark wet riverbed under water
+        Vector3 bedPos = { (riverStartX + riverEndX) / 2.0f, -0.4f, segZ };
+        DrawCube(bedPos, riverWidth + 0.6f, 0.5f, segLength, (Color){ 70, 60, 48, 255 });
+    }
+
+    // --- 2. Animated Procedural Teal Water Surface with Wave Ripples ---
+    const float quadLength = 4.0f;
+    int startQuad = (int)((playerZ - 40.0f) / quadLength);
+    int endQuad   = (int)((playerZ + 240.0f) / quadLength);
+
+    for (int q = startQuad; q <= endQuad; q++) {
+        float z1 = q * quadLength;
+        float z2 = z1 + quadLength;
+
+        // Animate vertical water wave oscillation
+        float waveY1 = 0.04f + 0.035f * sinf(z1 * 0.25f + time * 3.2f);
+        float waveY2 = 0.04f + 0.035f * sinf(z2 * 0.25f + time * 3.2f);
+
+        // Water surface main body (Teal / Deep Canyon Water)
+        Vector3 p1 = { riverStartX, waveY1, z1 };
+        Vector3 p2 = { riverEndX,   waveY1, z1 };
+        Vector3 p3 = { riverEndX,   waveY2, z2 };
+        Vector3 p4 = { riverStartX, waveY2, z2 };
+
+        Color waterCol = (Color){ 30, 125, 165, 220 };
+        DrawQuad3D(p1, p2, p3, p4, waterCol);
+
+        // Lighter aqua foam / water ripple highlights along river center
+        float midX1 = riverStartX + 1.2f + 0.5f * sinf(z1 * 0.4f + time * 2.0f);
+        float midX2 = riverStartX + 3.8f + 0.5f * cosf(z2 * 0.4f + time * 2.0f);
+
+        Vector3 r1 = { midX1, waveY1 + 0.005f, z1 };
+        Vector3 r2 = { midX2, waveY1 + 0.005f, z1 };
+        Vector3 r3 = { midX2, waveY2 + 0.005f, z2 };
+        Vector3 r4 = { midX1, waveY2 + 0.005f, z2 };
+
+        Color rippleCol = (Color){ 100, 210, 240, 180 };
+        DrawQuad3D(r1, r2, r3, r4, rippleCol);
+    }
+}
+
 // Render Ancient Sandstone Road & Large Continuous Mountain Valley (Zero Obstructive Collisions)
 void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float playerZ, float roadWidth) {
     const float roadHalfWidth = roadWidth / 2.0f;
@@ -349,7 +474,10 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
         DrawLine3D((Vector3){ 1.4f, 0.015f, z }, (Vector3){ 1.4f, 0.015f, z + 6.0f }, (Color){ 100, 90, 75, 120 });
     }
 
-    // --- 3. Rendering Large Continuous Mountain Valley Formations on Both Sides ---
+    // --- 3. Render Continuous Animated Canyon River & Sandy Banks (Right Side X = +8.0m to +13.5m) ---
+    DrawRiverAndBanks(playerZ, (float)GetTime());
+
+    // --- 4. Rendering Large Continuous Mountain Valley Formations on Both Sides ---
     if (!valley.isLoaded) return;
 
     const float segLength = valley.mountainSize.z;
@@ -610,8 +738,8 @@ int main() {
         // Draw / Render
         // ------------------------------------------------------------------------------
         BeginDrawing();
-            // Atmosphere: Deep Mountain Valley Canyon Sky Color
-            ClearBackground((Color){ 42, 52, 62, 255 });
+            // Atmosphere: Bright Warm Desert/Sandstone Canyon Sky Color
+            ClearBackground((Color){ 135, 190, 225, 255 });
 
             BeginMode3D(camera);
 
