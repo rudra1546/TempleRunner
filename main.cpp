@@ -23,7 +23,7 @@ struct Coin {
 struct PlayerCharacter {
     Vector3 position;
     float collisionRadius;
-    int currentLane;      // 0 = Left (-2.8f), 1 = Center (0.0f), 2 = Right (2.8f)
+    int currentLane;      // 0 = Visually Left (+2.8f), 1 = Center (0.0f), 2 = Visually Right (-2.8f)
     float targetX;        // Target X coordinate for smooth lane sliding
     float verticalVelocity;
     bool isGrounded;
@@ -42,6 +42,18 @@ struct PlayerCharacter {
     Vector3 modelScale;
     float rotationY;    // Y-axis rotation in degrees to face +Z
     Vector3 drawOffset; // Vertical offset to align feet with ground (y=0)
+};
+
+// Natural Mountain Valley Environment System
+struct MountainValleySystem {
+    Model leftMountainModel;
+    Model rightMountainModel;
+    BoundingBox leftBbox;
+    BoundingBox rightBbox;
+    float leftPosX;
+    float rightPosX;
+    bool isLoaded;
+    Vector3 mountainSize;
 };
 
 // Sphere vs AABB Box 3D Collision Check
@@ -131,6 +143,119 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     return true;
 }
 
+// Generate Large Organic 3D Mountain Valley Wall Mesh with Rock & Greenery Coloring
+Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
+    const int width = 128;
+    const int height = 256;
+
+    // Generate base Perlin noise heightmap
+    Image perlinImg = GenImagePerlinNoise(width, height, isLeftSide ? 0 : 500, 0, 3.5f);
+    Color* pixels = LoadImageColors(perlinImg);
+
+    // Sculpt natural canyon cliff profile (road-facing inner edge u=0 has zero height, outer peak edge u=1 has max height)
+    for (int z = 0; z < height; z++) {
+        for (int x = 0; x < width; x++) {
+            int idx = z * width + x;
+            float rawVal = (float)pixels[idx].r / 255.0f;
+
+            // u = 0 for road-facing inner edge, u = 1 for outer mountain peak edge
+            float normX = (float)x / (float)(width - 1);
+            float u = isLeftSide ? (1.0f - normX) : normX;
+
+            // Height slope curve (u=0 -> 0 height near road, u=1 -> max height at outer edge)
+            float heightSlope = powf(u, 1.8f);
+            float finalFactor = rawVal * heightSlope;
+
+            // Explicitly force the first ~25% (u < 0.25) to remain flat/low
+            if (u < 0.25f) {
+                finalFactor *= (u / 0.25f);
+            }
+
+            unsigned char hVal = (unsigned char)Clamp(finalFactor * 255.0f, 0.0f, 255.0f);
+            pixels[idx] = (Color){ hVal, hVal, hVal, 255 };
+        }
+    }
+
+    Image customHeightmap = {
+        .data = pixels,
+        .width = width,
+        .height = height,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+
+    Mesh mesh = GenMeshHeightmap(customHeightmap, size);
+    UnloadImageColors(pixels);
+
+    // Apply organic mountain rock & alpine greenery color map to vertices
+    if (mesh.colors != nullptr) {
+        for (int i = 0; i < mesh.vertexCount; i++) {
+            float y = mesh.vertices[i * 3 + 1];
+            float normY = Clamp(y / size.y, 0.0f, 1.0f);
+
+            Color vertexColor;
+            if (normY > 0.45f) {
+                // High mountain rock peaks with slate granite tone
+                vertexColor = (Color){ 105, 100, 95, 255 };
+            } else if (normY > 0.15f) {
+                // Mid-cliff ledges with moss and alpine greenery
+                vertexColor = (Color){ 45, 95, 52, 255 };
+            } else {
+                // Canyon base weathered sandstone rock
+                vertexColor = (Color){ 120, 108, 92, 255 };
+            }
+
+            mesh.colors[i * 4 + 0] = vertexColor.r;
+            mesh.colors[i * 4 + 1] = vertexColor.g;
+            mesh.colors[i * 4 + 2] = vertexColor.b;
+            mesh.colors[i * 4 + 3] = vertexColor.a;
+        }
+    }
+
+    Model model = LoadModelFromMesh(mesh);
+    return model;
+}
+
+// Initialize Natural Mountain Valley Environment System
+void InitMountainValleySystem(MountainValleySystem& valley) {
+    valley.mountainSize = (Vector3){ 48.0f, 42.0f, 160.0f }; // Width 48m, Peak Height 42m, Segment Length 160m
+
+    valley.leftMountainModel = GenerateMountainValleyModel(true, valley.mountainSize);
+    valley.rightMountainModel = GenerateMountainValleyModel(false, valley.mountainSize);
+
+    valley.leftBbox = GetModelBoundingBox(valley.leftMountainModel);
+    valley.rightBbox = GetModelBoundingBox(valley.rightMountainModel);
+
+    TraceLog(LOG_INFO, "Left Mountain bbox min=(%.2f %.2f %.2f) max=(%.2f %.2f %.2f)",
+             valley.leftBbox.min.x, valley.leftBbox.min.y, valley.leftBbox.min.z,
+             valley.leftBbox.max.x, valley.leftBbox.max.y, valley.leftBbox.max.z);
+
+    TraceLog(LOG_INFO, "Right Mountain bbox min=(%.2f %.2f %.2f) max=(%.2f %.2f %.2f)",
+             valley.rightBbox.min.x, valley.rightBbox.min.y, valley.rightBbox.min.z,
+             valley.rightBbox.max.x, valley.rightBbox.max.y, valley.rightBbox.max.z);
+
+    // HARD GEOMETRIC GUARANTEE:
+    // leftPos.x + leftMaxX <= -15.0f  ==> leftPos.x = -15.0f - leftBbox.max.x
+    // rightPos.x + rightMinX >= 15.0f ==> rightPos.x = 15.0f - rightBbox.min.x
+    valley.leftPosX = -15.0f - valley.leftBbox.max.x;
+    valley.rightPosX = 15.0f - valley.rightBbox.min.x;
+
+    TraceLog(LOG_INFO, "HARD GEOMETRIC GUARANTEE: LeftPosX = %.2f (Max Mesh X = %.2f <= -15.0m), RightPosX = %.2f (Min Mesh X = %.2f >= +15.0m)",
+             valley.leftPosX, valley.leftPosX + valley.leftBbox.max.x,
+             valley.rightPosX, valley.rightPosX + valley.rightBbox.min.x);
+
+    valley.isLoaded = true;
+}
+
+// Unload Mountain Valley Models
+void UnloadMountainValleySystem(MountainValleySystem& valley) {
+    if (valley.isLoaded) {
+        UnloadModel(valley.leftMountainModel);
+        UnloadModel(valley.rightMountainModel);
+        valley.isLoaded = false;
+    }
+}
+
 // Update Skeletal Model Animation Frame for pure In-Place running cycle
 void UpdatePlayerAnimation(PlayerCharacter& player, bool isRunning, float deltaTime) {
     if (!player.isModelLoaded || player.animsCount == 0) return;
@@ -175,6 +300,75 @@ void UnloadPlayerCharacter(PlayerCharacter& player) {
     }
 }
 
+// Render Ancient Sandstone Road & Large Continuous Mountain Valley (Zero Obstructive Collisions)
+void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float playerZ, float roadWidth) {
+    const float roadHalfWidth = roadWidth / 2.0f;
+
+    // --- 1. Ancient Sandstone Tile Road ---
+    const float tileLength = 6.0f;
+    int startTile = (int)((playerZ - 40.0f) / tileLength);
+    int endTile = (int)((playerZ + 250.0f) / tileLength);
+
+    for (int i = startTile; i <= endTile; i++) {
+        float tileZ = i * tileLength + tileLength / 2.0f;
+        Vector3 tilePos = { 0.0f, -0.5f, tileZ };
+
+        // Alternating worn sandstone tile tones
+        Color tileColor = (i % 2 == 0) ? (Color){ 145, 130, 110, 255 } : (Color){ 128, 115, 96, 255 };
+        Color wireColor = (Color){ 65, 55, 45, 255 };
+
+        DrawCube(tilePos, roadWidth, 1.0f, tileLength, tileColor);
+        DrawCubeWires(tilePos, roadWidth, 1.0f, tileLength, wireColor);
+
+        // Ancient Gold Border Trims & Side Curbs
+        Vector3 leftCurb = { -roadHalfWidth - 0.45f, 0.35f, tileZ };
+        Vector3 rightCurb = { roadHalfWidth + 0.45f, 0.35f, tileZ };
+        Color curbColor = (Color){ 75, 70, 62, 255 };
+        Color goldTrimColor = (Color){ 195, 145, 50, 255 };
+
+        DrawCube(leftCurb, 0.9f, 0.7f, tileLength, curbColor);
+        DrawCubeWires(leftCurb, 0.9f, 0.7f, tileLength, goldTrimColor);
+
+        DrawCube(rightCurb, 0.9f, 0.7f, tileLength, curbColor);
+        DrawCubeWires(rightCurb, 0.9f, 0.7f, tileLength, goldTrimColor);
+    }
+
+    // --- 2. Tile Seams & Lane Seams ---
+    float startSeamZ = floorf((playerZ - 30.0f) / 6.0f) * 6.0f;
+    float endSeamZ = playerZ + 220.0f;
+    for (float z = startSeamZ; z <= endSeamZ; z += 6.0f) {
+        if (z < 0.0f) continue;
+        Color seamColor = (fmodf(z, 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
+        DrawLine3D((Vector3){ -roadHalfWidth, 0.015f, z }, (Vector3){ roadHalfWidth, 0.015f, z }, seamColor);
+    }
+
+    // Lane division lines (Visual guidance)
+    for (float z = startSeamZ; z <= endSeamZ; z += 12.0f) {
+        if (z < 0.0f) continue;
+        DrawLine3D((Vector3){ -1.4f, 0.015f, z }, (Vector3){ -1.4f, 0.015f, z + 6.0f }, (Color){ 100, 90, 75, 120 });
+        DrawLine3D((Vector3){ 1.4f, 0.015f, z }, (Vector3){ 1.4f, 0.015f, z + 6.0f }, (Color){ 100, 90, 75, 120 });
+    }
+
+    // --- 3. Rendering Large Continuous Mountain Valley Formations on Both Sides ---
+    if (!valley.isLoaded) return;
+
+    const float segLength = valley.mountainSize.z;
+    int baseChunk = (int)(playerZ / segLength);
+
+    // Draw 3 continuous repeating mountain chunks along Z (covering playerZ - 60m to playerZ + 260m)
+    for (int c = -1; c <= 2; c++) {
+        float chunkZ = (baseChunk + c) * segLength;
+
+        // Position Left Mountain Range (X centered at valley.leftPosX, guaranteed max mesh X <= -15.0m)
+        Vector3 leftPos = { valley.leftPosX, 0.0f, chunkZ };
+        DrawModel(valley.leftMountainModel, leftPos, 1.0f, WHITE);
+
+        // Position Right Mountain Range (X centered at valley.rightPosX, guaranteed min mesh X >= +15.0m)
+        Vector3 rightPos = { valley.rightPosX, 0.0f, chunkZ };
+        DrawModel(valley.rightMountainModel, rightPos, 1.0f, WHITE);
+    }
+}
+
 int main() {
     // ----------------------------------------------------------------------------------
     // Initialization
@@ -183,7 +377,7 @@ int main() {
     const int screenHeight = 720;
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
-    InitWindow(screenWidth, screenHeight, "3D Temple Runner - Raylib");
+    InitWindow(screenWidth, screenHeight, "3D Temple Runner - Mountain Valley Canyon");
 
     // Load Rigged 3D Humanoid Character System with assets/player/character.glb
     PlayerCharacter player;
@@ -191,6 +385,10 @@ int main() {
     if (!InitPlayerCharacter(player, relativeModelPath)) {
         TraceLog(LOG_ERROR, "FATAL ERROR: Could not load 3D rigged humanoid character from %s", relativeModelPath);
     }
+
+    // Generate Natural 3D Mountain Valley Canyon System
+    MountainValleySystem valley;
+    InitMountainValleySystem(valley);
 
     const float forwardSpeed = 14.0f;   // Auto forward running velocity (units/sec)
 
@@ -412,42 +610,15 @@ int main() {
         // Draw / Render
         // ------------------------------------------------------------------------------
         BeginDrawing();
-            ClearBackground((Color){ 25, 30, 38, 255 });
+            // Atmosphere: Deep Mountain Valley Canyon Sky Color
+            ClearBackground((Color){ 42, 52, 62, 255 });
 
             BeginMode3D(camera);
 
-                // --- Draw Temple Run Stone Path & Ruin Walls ---
-                const float segmentLength = 200.0f;
-                int baseSegmentIndex = (int)(player.position.z / segmentLength);
+                // --- Draw Natural 3D Mountain Valley Canyon Environment & Sandstone Road ---
+                DrawMountainValleyEnvironment(valley, player.position.z, roadWidth);
 
-                for (int i = -1; i <= 3; i++) {
-                    float segZ = (baseSegmentIndex + i) * segmentLength + segmentLength / 2.0f;
-                    Vector3 segCenter = { 0.0f, -0.5f, segZ };
-
-                    // Temple Sandstone Road Floor
-                    DrawCube(segCenter, roadWidth, 1.0f, segmentLength, (Color){ 120, 110, 95, 255 });
-                    DrawCubeWires(segCenter, roadWidth, 1.0f, segmentLength, (Color){ 85, 75, 65, 255 });
-
-                    // Ancient Mossy Ruin Walls / Side Rails
-                    Vector3 leftWall = { -roadHalfWidth - 0.40f, 0.40f, segZ };
-                    Vector3 rightWall = { roadHalfWidth + 0.40f, 0.40f, segZ };
-                    DrawCube(leftWall, 0.8f, 0.8f, segmentLength, (Color){ 65, 80, 60, 255 });
-                    DrawCubeWires(leftWall, 0.8f, 0.8f, segmentLength, (Color){ 45, 60, 40, 255 });
-
-                    DrawCube(rightWall, 0.8f, 0.8f, segmentLength, (Color){ 65, 80, 60, 255 });
-                    DrawCubeWires(rightWall, 0.8f, 0.8f, segmentLength, (Color){ 45, 60, 40, 255 });
-                }
-
-                // --- Draw Temple Stone Tile Seams ---
-                float startGridZ = floorf((player.position.z - 20.0f) / 5.0f) * 5.0f;
-                float endGridZ = player.position.z + 180.0f;
-                for (float z = startGridZ; z <= endGridZ; z += 5.0f) {
-                    if (z < 0.0f) continue;
-                    Color lineCol = (fmodf(z, 20.0f) == 0.0f) ? (Color){ 210, 160, 70, 220 } : (Color){ 80, 70, 60, 160 };
-                    DrawLine3D((Vector3){ -roadHalfWidth, 0.01f, z }, (Vector3){ roadHalfWidth, 0.01f, z }, lineCol);
-                }
-
-                // --- Draw Spawning Obstacles ---
+                // --- Draw Spawning Gameplay Obstacles ---
                 for (const auto& obs : obstacles) {
                     DrawCube(obs.position, obs.size.x, obs.size.y, obs.size.z, obs.color);
                     DrawCubeWires(obs.position, obs.size.x + 0.02f, obs.size.y + 0.02f, obs.size.z + 0.02f, obs.wireColor);
@@ -528,7 +699,8 @@ int main() {
         EndDrawing();
     }
 
-    // Unload 3D Model and Resources
+    // Unload 3D Models and Resources
+    UnloadMountainValleySystem(valley);
     UnloadPlayerCharacter(player);
     CloseWindow();
 
