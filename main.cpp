@@ -23,7 +23,10 @@ struct Coin {
 struct PlayerCharacter {
     Vector3 position;
     float collisionRadius;
-    float lateralVelocity;
+    int currentLane;      // 0 = Left (-2.8f), 1 = Center (0.0f), 2 = Right (2.8f)
+    float targetX;        // Target X coordinate for smooth lane sliding
+    float verticalVelocity;
+    bool isGrounded;
 
     // 3D Model & Skeletal Animations
     Model model;
@@ -58,7 +61,10 @@ bool CheckCollisionSphereBox(Vector3 center, float radius, BoundingBox box) {
 bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
     player.collisionRadius = 0.9f;
-    player.lateralVelocity = 0.0f;
+    player.currentLane = 1; // Start in Center Lane (0.0f)
+    player.targetX = 0.0f;
+    player.verticalVelocity = 0.0f;
+    player.isGrounded = true;
     player.isModelLoaded = false;
     player.animations = nullptr;
     player.animsCount = 0;
@@ -94,10 +100,10 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
 
     float height = bbox.max.y - bbox.min.y;
     if (height > 0.01f) {
-        float scaleFactor = 2.0f / height;
+        float scaleFactor = 2.5f / height;
         player.modelScale = (Vector3){ scaleFactor, scaleFactor, scaleFactor };
         player.drawOffset.y = -bbox.min.y * scaleFactor;
-        TraceLog(LOG_INFO, "Calculated model scaleFactor: %.4f (Target Height: 2.0m)", scaleFactor);
+        TraceLog(LOG_INFO, "Calculated model scaleFactor: %.4f (Target Height: 2.5m)", scaleFactor);
     }
 
     // Load Skeletal Animations & Search Animation Names Dynamically
@@ -188,15 +194,17 @@ int main() {
 
     const float forwardSpeed = 14.0f;   // Auto forward running velocity (units/sec)
 
-    // Steering Physics Constants (Tunable)
-    const float maxLateralSpeed = 12.0f; // Max horizontal speed (units/sec)
-    const float steeringAccel   = 45.0f; // Acceleration rate when steering (units/sec^2)
-    const float frictionDecel   = 35.0f; // Deceleration rate when no input is pressed (units/sec^2)
+    // Vertical Jump Physics Constants (Smooth ~0.87s arc, clears 2.0m obstacles)
+    const float jumpVelocity = 10.5f;   // Vertical launch velocity
+    const float gravity      = -24.0f;  // Downward gravity acceleration
 
     // Road parameters (Temple Run Stone Path)
     const float roadWidth = 10.0f;
     const float roadHalfWidth = roadWidth / 2.0f;
-    const float maxPlayerX = roadHalfWidth - 0.8f; // Keep player within temple path borders
+
+    // Discrete 3-Lane System Coordinates (Camera view: +X is visually LEFT, -X is visually RIGHT)
+    const float laneX[3] = { 2.8f, 0.0f, -2.8f }; // 0: Visually Left (+2.8f), 1: Center (0.0f), 2: Visually Right (-2.8f)
+    const float laneSlideSpeed = 16.0f;          // Exponential slide interpolation rate (~0.20s)
 
     // Obstacle Spawning & Tuning Constants
     const Vector3 obstacleSize = { 2.2f, 2.0f, 2.0f };
@@ -220,13 +228,13 @@ int main() {
     // Game state flags
     bool isGameOver = false;
 
-    // Available obstacle and coin lanes across road width
-    const float lanes[3] = { -2.8f, 0.0f, 2.8f };
-
     // Reset game helper lambda
     auto ResetGame = [&]() {
         player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
-        player.lateralVelocity = 0.0f;
+        player.currentLane = 1; // Center lane
+        player.targetX = 0.0f;
+        player.verticalVelocity = 0.0f;
+        player.isGrounded = true;
         player.animTime = 0.0f;
         obstacles.clear();
         coins.clear();
@@ -256,45 +264,45 @@ int main() {
         }
 
         if (!isGameOver) {
-            // --- 1. Movement & Steering Physics ---
+            // --- 1. Forward Speed & Lane Switching Input ---
             player.position.z += forwardSpeed * deltaTime;
 
-            // Player input mapping (visually verified for on-screen movement):
-            // A key / Left Arrow  -> Visually move LEFT on screen
-            // D key / Right Arrow -> Visually move RIGHT on screen
-            float moveInput = 0.0f;
-
-            if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) {
-                moveInput = 1.0f;
-            }
-
-            if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) {
-                moveInput = -1.0f;
-            }
-
-            if (moveInput != 0.0f) {
-                player.lateralVelocity += moveInput * steeringAccel * deltaTime;
-                if (player.lateralVelocity > maxLateralSpeed)  player.lateralVelocity = maxLateralSpeed;
-                if (player.lateralVelocity < -maxLateralSpeed) player.lateralVelocity = -maxLateralSpeed;
-            } else {
-                if (player.lateralVelocity > 0.0f) {
-                    player.lateralVelocity -= frictionDecel * deltaTime;
-                    if (player.lateralVelocity < 0.0f) player.lateralVelocity = 0.0f;
-                } else if (player.lateralVelocity < 0.0f) {
-                    player.lateralVelocity += frictionDecel * deltaTime;
-                    if (player.lateralVelocity > 0.0f) player.lateralVelocity = 0.0f;
+            // Discrete 3-Lane Input Switching (IsKeyPressed prevents holding auto-repeat)
+            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT)) {
+                if (player.currentLane > 0) {
+                    player.currentLane--;
+                    player.targetX = laneX[player.currentLane];
                 }
             }
 
-            player.position.x += player.lateralVelocity * deltaTime;
-
-            if (player.position.x < -maxPlayerX) {
-                player.position.x = -maxPlayerX;
-                if (player.lateralVelocity < 0.0f) player.lateralVelocity = 0.0f;
+            if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) {
+                if (player.currentLane < 2) {
+                    player.currentLane++;
+                    player.targetX = laneX[player.currentLane];
+                }
             }
-            if (player.position.x > maxPlayerX) {
-                player.position.x = maxPlayerX;
-                if (player.lateralVelocity > 0.0f) player.lateralVelocity = 0.0f;
+
+            // Smooth Lateral Interpolation toward Target Lane X Position (~0.20s slide)
+            player.position.x = Lerp(player.position.x, player.targetX, laneSlideSpeed * deltaTime);
+            if (fabsf(player.targetX - player.position.x) < 0.005f) {
+                player.position.x = player.targetX;
+            }
+
+            // --- Vertical Jump Physics (SPACE Key) ---
+            if (player.isGrounded && IsKeyPressed(KEY_SPACE)) {
+                player.verticalVelocity = jumpVelocity;
+                player.isGrounded = false;
+            }
+
+            if (!player.isGrounded) {
+                player.verticalVelocity += gravity * deltaTime;
+                player.position.y += player.verticalVelocity * deltaTime;
+
+                if (player.position.y <= 0.0f) {
+                    player.position.y = 0.0f;
+                    player.verticalVelocity = 0.0f;
+                    player.isGrounded = true;
+                }
             }
 
             // Update Skeletal Model Running Animation continuously (In-Place loop)
@@ -303,7 +311,7 @@ int main() {
             // --- 2. Dynamic Obstacle Spawning ---
             while (nextSpawnZ < player.position.z + spawnAheadDistance) {
                 int laneIndex = GetRandomValue(0, 2);
-                float posX = lanes[laneIndex];
+                float posX = laneX[laneIndex];
                 Vector3 obsPos = { posX, obstacleSize.y / 2.0f, nextSpawnZ };
 
                 Obstacle obs;
@@ -319,7 +327,7 @@ int main() {
             // --- 3. Dynamic Coin Sequence Spawning ---
             while (nextCoinSpawnZ < player.position.z + spawnAheadDistance) {
                 int coinLane = GetRandomValue(0, 2);
-                float coinX = lanes[coinLane];
+                float coinX = laneX[coinLane];
                 int coinSequenceCount = GetRandomValue(3, 5); // Sequence trail of coins
                 float spacing = 4.5f;
 
@@ -345,7 +353,7 @@ int main() {
                 currentCoinPos.y += 0.15f * sinf(coin.rotation * (float)DEG2RAD * 2.0f);
 
                 // Sphere-to-sphere collision check with runner body
-                Vector3 playerCenter = { player.position.x, 1.0f, player.position.z };
+                Vector3 playerCenter = { player.position.x, player.position.y + 1.0f, player.position.z };
                 float hitRadius = player.collisionRadius + coinRadius;
 
                 if (Vector3DistanceSqr(playerCenter, currentCoinPos) <= hitRadius * hitRadius) {
@@ -372,7 +380,7 @@ int main() {
             }
 
             // --- 6. Obstacle Collision Detection ---
-            Vector3 playerCenter = { player.position.x, 1.0f, player.position.z };
+            Vector3 playerCenter = { player.position.x, player.position.y + 1.0f, player.position.z };
             for (const auto& obs : obstacles) {
                 BoundingBox obsBox = {
                     (Vector3){ obs.position.x - obs.size.x / 2.0f, obs.position.y - obs.size.y / 2.0f, obs.position.z - obs.size.z / 2.0f },
@@ -381,7 +389,7 @@ int main() {
 
                 if (CheckCollisionSphereBox(playerCenter, player.collisionRadius, obsBox)) {
                     isGameOver = true;
-                    player.lateralVelocity = 0.0f;
+                    player.verticalVelocity = 0.0f;
                     break;
                 }
             }
@@ -472,17 +480,18 @@ int main() {
             EndMode3D();
 
             // --- HUD Overlay ---
-            DrawRectangle(15, 15, 340, 185, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
-            DrawRectangleLines(15, 15, 340, 185, (Color){ 210, 150, 40, 255 });
+            DrawRectangle(15, 15, 340, 202, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
+            DrawRectangleLines(15, 15, 340, 202, (Color){ 210, 150, 40, 255 });
 
             DrawText("TEMPLE RUNNER 3D", 30, 25, 20, (Color){ 240, 170, 50, 255 });
-            DrawText("A / Left Arrow  : Move Left", 30, 52, 13, RAYWHITE);
-            DrawText("D / Right Arrow : Move Right", 30, 70, 13, RAYWHITE);
-            DrawText("R Key           : Restart (Game Over)", 30, 88, 13, (Color){ 200, 200, 220, 255 });
+            DrawText("A / Left Arrow  : Switch Lane Left", 30, 52, 13, RAYWHITE);
+            DrawText("D / Right Arrow : Switch Lane Right", 30, 70, 13, RAYWHITE);
+            DrawText("SPACE Key       : Jump", 30, 88, 13, (Color){ 100, 240, 255, 255 });
+            DrawText("R Key           : Restart (Game Over)", 30, 106, 13, (Color){ 200, 200, 220, 255 });
 
-            DrawText(TextFormat("Distance: %.1f m", player.position.z), 30, 112, 16, YELLOW);
-            DrawText(TextFormat("Coins: %d", score), 30, 134, 16, (Color){ 255, 215, 0, 255 });
-            DrawText(TextFormat("Speed: %.1f m/s", isGameOver ? 0.0f : forwardSpeed), 30, 156, 16, isGameOver ? RED : GREEN);
+            DrawText(TextFormat("Distance: %.1f m", player.position.z), 30, 128, 16, YELLOW);
+            DrawText(TextFormat("Coins: %d", score), 30, 150, 16, (Color){ 255, 215, 0, 255 });
+            DrawText(TextFormat("Speed: %.1f m/s", isGameOver ? 0.0f : forwardSpeed), 30, 172, 16, isGameOver ? RED : GREEN);
 
             DrawFPS(GetScreenWidth() - 100, 20);
 
