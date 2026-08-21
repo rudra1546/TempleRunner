@@ -1,0 +1,51 @@
+# ==============================================================================
+# GitIgnore for C++ Raylib Temple Runner Project
+# ==============================================================================
+
+# Compiled Executables
+*.exe
+*.out
+*.app
+
+# Object Files & Build Artifacts
+*.o
+*.obj
+*.lib
+*.dll
+*.a
+*.pdb
+
+# Build Output Directories
+build/
+bin/
+out/
+Debug/
+Release/
+x64/
+x86/
+
+# CMake Generated Files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# IDE & Editor Specific Files
+.vs/
+.vscode/
+.idea/
+*.sln
+*.vcxproj
+*.vcxproj.user
+*.vcxproj.filters
+
+# Temporary & Archive Files
+FBX2glTF/
+*.zip
+*.log
+*.tmp
+
+# Preserve Game Assets Directory
+!assets/
+!assets/**
