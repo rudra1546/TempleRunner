@@ -576,15 +576,15 @@ void DrawQuad3D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, Color color) {
     rlEnd();
 }
 
-// Helper function to check if player position is on solid road ground for 90-Degree L-Shaped Map
+// Helper function to check if player position is on solid road ground for 90-Degree T-Junction Dual Route Map
 inline bool IsOnRoadSurface(Vector3 pos) {
     // 1. Straight Road Segment (0m <= Z <= 503m, X centered at 0 within 3.5m)
     if (pos.z >= -10.0f && pos.z <= 503.0f) {
         if (pos.x >= -3.5f && pos.x <= 3.5f) return true;
     }
-    // 2. 90-Degree Turn Corner & Turned Horizontal Path (Z approx 500m, X extending along +X from -3.5m to 350m)
+    // 2. 90-Degree Turn Corner & Turned Horizontal Paths: Left (X: 0 -> +350m) & Right (X: 0 -> -350m)
     if (pos.z >= 496.5f && pos.z <= 503.5f) {
-        if (pos.x >= -3.5f && pos.x <= 350.0f) return true;
+        if (pos.x >= -350.0f && pos.x <= 350.0f) return true;
     }
     return false;
 }
@@ -600,7 +600,7 @@ void DrawRiverAndBanks(float playerZ, float time) {
 
     for (int i = startSeg; i <= endSeg; i++) {
         float segZ = i * segLength + segLength / 2.0f;
-        if (segZ > 505.0f) continue; // End river at turn boundary
+        if (segZ > 490.0f) continue; // End river cleanly before the turned road intersection at Z=497m
 
         float riverStartX = -8.0f;
         float riverEndX   = riverStartX - riverWidth;
@@ -623,7 +623,7 @@ void DrawRiverAndBanks(float playerZ, float time) {
     for (int q = startQuad; q <= endQuad; q++) {
         float z1 = q * quadLength;
         float z2 = z1 + quadLength;
-        if (z1 > 505.0f) continue;
+        if (z1 > 490.0f) continue;
 
         float riverStartX1 = -8.0f;
         float riverEndX1   = riverStartX1 - riverWidth;
@@ -654,9 +654,9 @@ void DrawRiverAndBanks(float playerZ, float time) {
     }
 }
 
-// Render Clean 90-Degree L-Shaped Road Environment (Zero Overlaps, Zero Obstructions, Zero Trees)
+// Render Clean 90-Degree Dual Route Environment (Left Path +X and Mirrored Right Path -X)
 void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float playerZ, float roadWidth) {
-    const float narrowPathWidth = 6.0f; // 6.0m path width (X in [-3.0, 3.0] on straight, Z in [497.0, 503.0] on turned)
+    const float narrowPathWidth = 6.0f; // 6.0m path width (X in [-3.0, 3.0] on straight, Z in [497.0, 503.0] on turned routes)
     const float tileLength = 6.0f;
 
     // --- 1. Straight Road Segment (0m <= Z < 497.0m) ---
@@ -673,27 +673,24 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
         int tileIdx = (int)(z / tileLength);
         DrawTileSurface((Vector3){ 0.0f, -0.5f, centerZ }, narrowPathWidth, len, tileIdx);
 
-        // West curb (Right side when running +Z, X = -3.45m)
+        // West curb (Right side when running +Z, X = -3.45m) - stops cleanly at Z = 497.0m for right turn opening!
         DrawCurb((Vector3){ -3.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
 
-        // East curb (Left side when running +Z, X = +3.45m) - stops cleanly at Z = 497.0m!
+        // East curb (Left side when running +Z, X = +3.45m) - stops cleanly at Z = 497.0m for left turn opening!
         DrawCurb((Vector3){ 3.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
     }
 
-    // --- 2. Clean 90-Degree Turn Corner Tile (Z in [497.0m, 503.0m], X in [-3.0m, 3.0m]) ---
+    // --- 2. Clean 90-Degree T-Junction Corner Tile (Z in [497.0m, 503.0m], X in [-3.0m, 3.0m]) ---
     if (playerZ + 250.0f >= 497.0f) {
-        // Corner road surface (seamlessly joins straight road at Z=497 and turned road at X=3.0)
+        // Corner road surface (seamlessly joins straight road at Z=497, left route at X=+3.0, and right route at X=-3.0)
         DrawTileSurface((Vector3){ 0.0f, -0.5f, 500.0f }, narrowPathWidth, narrowPathWidth, 83);
 
-        // West Curb continuation (X = -3.45m, Z from 497 to 503)
-        DrawCurb((Vector3){ -3.45f, 0.35f, 500.0f }, (Vector3){ 0.9f, 0.7f, 6.0f });
-
-        // North Back Wall Curb (Z = 503.45m, X from -3.9m to 3.0m)
-        DrawCurb((Vector3){ -0.45f, 0.35f, 503.45f }, (Vector3){ 6.9f, 0.7f, 0.9f });
-        // (East side at X=+3.0m and South side at Z=497.0m are wide open for turning!)
+        // North Back Wall Curb (Z = 503.45m, spans center X from -3.0m to +3.0m)
+        DrawCurb((Vector3){ 0.0f, 0.35f, 503.45f }, (Vector3){ 6.9f, 0.7f, 0.9f });
+        // (East side at X=+3.0m, West side at X=-3.0m, and South side at Z=497.0m are wide open for turning left and right!)
     }
 
-    // --- 3. Turned Horizontal Road Segment (X from 3.0m to 350.0m, centered at Z = 500.0m) ---
+    // --- 3. Turned Left Horizontal Road (+X: 3.0m to 350.0m, centered at Z = 500.0m) ---
     if (playerZ + 250.0f >= 480.0f) {
         for (float x = 3.0f; x <= 350.0f; x += tileLength) {
             float nextX = fminf(x + tileLength, 350.0f);
@@ -710,9 +707,26 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
             // South Curb (Z = 496.55m)
             DrawCurb((Vector3){ centerX, 0.35f, 496.55f }, (Vector3){ len, 0.7f, 0.9f });
         }
+
+        // --- 4. Mirrored Turned Right Horizontal Road (-X: -3.0m to -350.0m, centered at Z = 500.0m) ---
+        for (float x = -3.0f; x >= -350.0f; x -= tileLength) {
+            float nextX = fmaxf(x - tileLength, -350.0f);
+            float len = fabsf(nextX - x);
+            float centerX = (x + nextX) / 2.0f;
+            int tileIdx = (int)(fabsf(x) / tileLength);
+
+            // Road surface
+            DrawTileSurface((Vector3){ centerX, -0.5f, 500.0f }, len, narrowPathWidth, tileIdx);
+
+            // North Curb (Z = 503.45m)
+            DrawCurb((Vector3){ centerX, 0.35f, 503.45f }, (Vector3){ len, 0.7f, 0.9f });
+
+            // South Curb (Z = 496.55m)
+            DrawCurb((Vector3){ centerX, 0.35f, 496.55f }, (Vector3){ len, 0.7f, 0.9f });
+        }
     }
 
-    // --- 4. Tile Seams ---
+    // --- 5. Tile Seams ---
     float startSeamZ = floorf((playerZ - 30.0f) / 6.0f) * 6.0f;
     float endSeamZ = fminf(playerZ + 220.0f, 497.0f);
     for (float z = startSeamZ; z <= endSeamZ; z += 6.0f) {
@@ -722,8 +736,14 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
     }
 
     if (playerZ + 250.0f >= 480.0f) {
+        // Left road seams (+X)
         for (float x = 3.0f; x <= 350.0f; x += 6.0f) {
             Color seamColor = (fmodf(x, 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
+            DrawLine3D((Vector3){ x, 0.015f, 497.0f }, (Vector3){ x, 0.015f, 503.0f }, seamColor);
+        }
+        // Right road seams (-X)
+        for (float x = -3.0f; x >= -350.0f; x -= 6.0f) {
+            Color seamColor = (fmodf(fabsf(x), 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
             DrawLine3D((Vector3){ x, 0.015f, 497.0f }, (Vector3){ x, 0.015f, 503.0f }, seamColor);
         }
     }
@@ -818,10 +838,11 @@ void UpdateDrawFrame() {
     g.lastLateralSteer = lateralSteer;
 
     if (!g.isGameOver) {
-        // 2. Road Progression & Direction Control
-        bool isOnTurnedPath = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
+        // 2. Road Progression & Direction Control for Dual Routes (Left +X and Right -X)
+        bool isOnTurnedLeftPath  = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
+        bool isOnTurnedRightPath = (g.player.position.x <= -3.0f && g.player.position.z >= 495.0f);
 
-        if (!isOnTurnedPath) {
+        if (!isOnTurnedLeftPath && !isOnTurnedRightPath) {
             // Running forward along +Z on Straight Road (0m -> 500m)
             g.player.position.z += g.forwardSpeed * deltaTime;
 
@@ -832,32 +853,53 @@ void UpdateDrawFrame() {
             if (g.player.position.z < 496.5f) {
                 g.player.position.x = Clamp(g.player.position.x, -3.0f, 3.0f);
             }
-        } else {
-            // Running forward along +X on Turned Horizontal Road
+        } else if (isOnTurnedLeftPath) {
+            // Running forward along +X on Left Turned Horizontal Road
             g.player.position.x += g.forwardSpeed * deltaTime; // Auto forward running along +X!
 
-            // On Turned Road (+X): Steer Left is -Z, Steer Right is +Z
+            // On Left Turned Road (+X): Steer Left is -Z, Steer Right is +Z
             g.player.position.z += (lateralSteer) * g.horizontalSpeed * deltaTime;
+            g.player.position.z = Clamp(g.player.position.z, 497.0f, 503.0f);
+        } else {
+            // Running forward along -X on Right Turned Horizontal Road
+            g.player.position.x -= g.forwardSpeed * deltaTime; // Auto forward running along -X!
+
+            // On Right Turned Road (-X): Steer Left is +Z, Steer Right is -Z
+            g.player.position.z += (-lateralSteer) * g.horizontalSpeed * deltaTime;
             g.player.position.z = Clamp(g.player.position.z, 497.0f, 503.0f);
         }
 
         // 3. Dynamic visual rotation matching movement trajectory and turn progression
         // NOTE: Gyro and touch only control lateral position across road width; they NEVER rotate character or change road heading.
         float targetRotationY = 0.0f;
-        if (!isOnTurnedPath) {
-            if (g.player.position.z >= 495.0f && g.player.position.x > -1.0f) {
-                // In turn zone: smoothly transition facing angle from 0 deg (+Z) to 90 deg (+X)
-                float turnProgress = Clamp((g.player.position.x + 1.0f) / 4.0f, 0.0f, 1.0f);
-                targetRotationY = turnProgress * 90.0f;
-                if (lateralSteer < -0.1f) {
-                    float moveYaw = atan2f(g.horizontalSpeed, g.forwardSpeed) * RAD2DEG; // ~35.5 deg
-                    targetRotationY = fmaxf(targetRotationY, moveYaw);
+        if (!isOnTurnedLeftPath && !isOnTurnedRightPath) {
+            if (g.player.position.z >= 495.0f) {
+                if (g.player.position.x > 0.5f) {
+                    // In left turn zone: smoothly transition facing angle from 0 deg (+Z) to +90 deg (+X)
+                    float turnProgress = Clamp((g.player.position.x - 0.5f) / 2.5f, 0.0f, 1.0f);
+                    targetRotationY = turnProgress * 90.0f;
+                    if (lateralSteer < -0.1f) {
+                        float moveYaw = atan2f(g.horizontalSpeed, g.forwardSpeed) * RAD2DEG; // ~35.5 deg
+                        targetRotationY = fmaxf(targetRotationY, moveYaw);
+                    }
+                } else if (g.player.position.x < -0.5f) {
+                    // In right turn zone: smoothly transition facing angle from 0 deg (+Z) to -90 deg (-X)
+                    float turnProgress = Clamp((-g.player.position.x - 0.5f) / 2.5f, 0.0f, 1.0f);
+                    targetRotationY = -turnProgress * 90.0f;
+                    if (lateralSteer > 0.1f) {
+                        float moveYaw = -atan2f(g.horizontalSpeed, g.forwardSpeed) * RAD2DEG; // -35.5 deg
+                        targetRotationY = fminf(targetRotationY, moveYaw);
+                    }
+                } else {
+                    targetRotationY = 0.0f;
                 }
             } else {
                 targetRotationY = 0.0f;
             }
+        } else if (isOnTurnedLeftPath) {
+            targetRotationY = 90.0f; // Facing +X
         } else {
-            targetRotationY = 90.0f;
+            targetRotationY = -90.0f; // Facing -X
         }
 
         // Smoothly rotate character model to face travel direction without snapping or lagging
@@ -892,21 +934,39 @@ void UpdateDrawFrame() {
         // Update Skeletal Model Running Animation continuously (In-Place loop)
         UpdatePlayerAnimation(g.player, true, deltaTime);
 
-        // 5. Dynamic Coin Sequence Spawning
+        // 5. Dynamic Coin Sequence Spawning (Spawn on straight road and both Left & Right branches)
         const float spawnAheadDistance = 250.0f;
         while (g.nextCoinSpawnZ < g.player.position.z + spawnAheadDistance) {
-            float coinX = (g.nextCoinSpawnZ <= 490.0f) ? 0.0f : (float)GetRandomValue(10, 250);
-            float coinZ = (g.nextCoinSpawnZ <= 490.0f) ? g.nextCoinSpawnZ : 500.0f;
+            float coinZ = g.nextCoinSpawnZ;
             int coinSequenceCount = GetRandomValue(3, 5);
             float spacing = 4.5f;
 
-            for (int c = 0; c < coinSequenceCount; c++) {
-                Coin coin;
-                Vector3 cPos = (g.nextCoinSpawnZ <= 490.0f) ? (Vector3){ coinX, g.coinFloatHeight, coinZ + c * spacing } : (Vector3){ coinX + c * spacing, g.coinFloatHeight, coinZ };
-                coin.position = cPos;
-                coin.collected = false;
-                coin.rotation = (float)GetRandomValue(0, 360);
-                g.coins.push_back(coin);
+            if (g.nextCoinSpawnZ <= 490.0f) {
+                for (int c = 0; c < coinSequenceCount; c++) {
+                    Coin coin;
+                    coin.position = (Vector3){ 0.0f, g.coinFloatHeight, coinZ + c * spacing };
+                    coin.collected = false;
+                    coin.rotation = (float)GetRandomValue(0, 360);
+                    g.coins.push_back(coin);
+                }
+            } else {
+                float offsetFromTurn = g.nextCoinSpawnZ - 490.0f;
+                float startX = 6.0f + offsetFromTurn;
+                for (int c = 0; c < coinSequenceCount; c++) {
+                    // Left route coin (+X)
+                    Coin leftCoin;
+                    leftCoin.position = (Vector3){ startX + c * spacing, g.coinFloatHeight, 500.0f };
+                    leftCoin.collected = false;
+                    leftCoin.rotation = (float)GetRandomValue(0, 360);
+                    g.coins.push_back(leftCoin);
+
+                    // Mirrored Right route coin (-X)
+                    Coin rightCoin;
+                    rightCoin.position = (Vector3){ -(startX + c * spacing), g.coinFloatHeight, 500.0f };
+                    rightCoin.collected = false;
+                    rightCoin.rotation = (float)GetRandomValue(0, 360);
+                    g.coins.push_back(rightCoin);
+                }
             }
 
             g.nextCoinSpawnZ += coinSequenceCount * spacing + (float)GetRandomValue(15, 30);
@@ -934,10 +994,12 @@ void UpdateDrawFrame() {
         // Garbage collection
         for (size_t i = 0; i < g.coins.size(); ) {
             bool shouldErase = g.coins[i].collected;
-            if (!isOnTurnedPath) {
+            if (!isOnTurnedLeftPath && !isOnTurnedRightPath) {
                 if (g.coins[i].position.z < g.player.position.z - 30.0f) shouldErase = true;
-            } else {
+            } else if (isOnTurnedLeftPath) {
                 if (g.coins[i].position.x < g.player.position.x - 30.0f) shouldErase = true;
+            } else {
+                if (g.coins[i].position.x > g.player.position.x + 30.0f) shouldErase = true;
             }
             if (shouldErase) {
                 g.coins.erase(g.coins.begin() + i);
@@ -950,14 +1012,18 @@ void UpdateDrawFrame() {
     // Camera Tracking
     Vector3 desiredCamPos;
     Vector3 desiredCamTarget;
-    bool isOnTurnedPath = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
+    bool isOnTurnedLeftPath  = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
+    bool isOnTurnedRightPath = (g.player.position.x <= -3.0f && g.player.position.z >= 495.0f);
 
-    if (!isOnTurnedPath) {
+    if (!isOnTurnedLeftPath && !isOnTurnedRightPath) {
         desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
         desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
-    } else {
+    } else if (isOnTurnedLeftPath) {
         desiredCamPos = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 4.0f, g.player.position.z };
         desiredCamTarget = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 1.0f, g.player.position.z };
+    } else {
+        desiredCamPos = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 4.0f, g.player.position.z };
+        desiredCamTarget = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 1.0f, g.player.position.z };
     }
 
     float camLerpSpeed = Clamp(6.0f * deltaTime, 0.0f, 1.0f);
@@ -1006,7 +1072,14 @@ void UpdateDrawFrame() {
         DrawText("Tilt Device    : Gyro Steering", 30, 86, 13, (Color){ 100, 240, 255, 255 });
         DrawText("SPACE / Tap Top: Jump", 30, 104, 13, (Color){ 255, 215, 0, 255 });
 
-        float currentDistance = isOnTurnedPath ? (500.0f + (g.player.position.x - 3.0f)) : g.player.position.z;
+        float currentDistance = 0.0f;
+        if (isOnTurnedLeftPath) {
+            currentDistance = 500.0f + (g.player.position.x - 3.0f);
+        } else if (isOnTurnedRightPath) {
+            currentDistance = 500.0f + (-g.player.position.x - 3.0f);
+        } else {
+            currentDistance = g.player.position.z;
+        }
         DrawText(TextFormat("Distance: %.1f m", currentDistance), 30, 128, 16, YELLOW);
         DrawText(TextFormat("Coins: %d", g.score), 30, 150, 16, (Color){ 255, 215, 0, 255 });
         DrawText(TextFormat("Speed: %.1f m/s", g.isGameOver ? 0.0f : g.forwardSpeed), 30, 172, 16, g.isGameOver ? RED : GREEN);
