@@ -54,49 +54,170 @@ struct MountainValleySystem {
 
 EM_JS(void, InitWebOrientationBridge, (), {
     window.floodrunner_gamma = 0.0;
-    window.floodrunner_motion_allowed = false;
-    window.floodrunner_motion_supported = ('DeviceOrientationEvent' in window);
+    window.floodrunner_raw_gamma = 0.0;
+    window.floodrunner_raw_beta = 0.0;
+    window.floodrunner_screen_angle = 0;
+    window.floodrunner_event_count = 0;
+    window.floodrunner_permission_status = 0; // 0: unrequested, 1: granted/active, 2: denied, 3: unsupported
+    window.floodrunner_motion_supported = (typeof window !== 'undefined' && 'DeviceOrientationEvent' in window);
+
+    if (!window.floodrunner_motion_supported) {
+        window.floodrunner_permission_status = 3;
+    }
+
+    window.onOrientationEvent = function(e) {
+        window.floodrunner_event_count++;
+        window.floodrunner_raw_gamma = (e.gamma !== null && e.gamma !== undefined) ? e.gamma : 0.0;
+        window.floodrunner_raw_beta = (e.beta !== null && e.beta !== undefined) ? e.beta : 0.0;
+
+        var angle = 0;
+        if (screen.orientation && typeof screen.orientation.angle === 'number') {
+            angle = screen.orientation.angle;
+        } else if (typeof window.orientation === 'number') {
+            angle = window.orientation;
+        }
+        window.floodrunner_screen_angle = angle;
+
+        var tilt = window.floodrunner_raw_gamma;
+        if (angle === 90) {
+            tilt = window.floodrunner_raw_beta;
+        } else if (angle === -90 || angle === 270) {
+            tilt = -window.floodrunner_raw_beta;
+        } else if (angle === 180) {
+            tilt = -window.floodrunner_raw_gamma;
+        }
+        window.floodrunner_gamma = tilt;
+    };
 
     window.requestFloodRunnerMotion = function() {
+        if (!window.floodrunner_motion_supported) {
+            window.floodrunner_permission_status = 3;
+            return;
+        }
+
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission()
                 .then(function(state) {
                     if (state === 'granted') {
-                        window.floodrunner_motion_allowed = true;
-                        window.addEventListener('deviceorientation', function(e) {
-                            if (e.gamma !== null && e.gamma !== undefined) {
-                                window.floodrunner_gamma = e.gamma;
-                            }
-                        }, true);
+                        window.floodrunner_permission_status = 1;
+                        window.addEventListener('deviceorientation', window.onOrientationEvent, true);
+                        var btn = document.getElementById('floodrunner-motion-btn');
+                        if (btn) {
+                            btn.innerText = 'Gyro: Active';
+                            btn.style.backgroundColor = 'rgba(20, 140, 60, 0.9)';
+                            btn.style.borderColor = '#40ff80';
+                            setTimeout(function() { if (btn) btn.style.display = 'none'; }, 2000);
+                        }
+                    } else {
+                        window.floodrunner_permission_status = 2;
+                        var btn = document.getElementById('floodrunner-motion-btn');
+                        if (btn) {
+                            btn.innerText = 'Gyro: Denied';
+                            btn.style.backgroundColor = 'rgba(160, 30, 30, 0.9)';
+                            btn.style.borderColor = '#ff6060';
+                        }
                     }
                 })
                 .catch(function(err) {
-                    console.warn("Motion permission error:", err);
+                    console.warn("DeviceOrientation error:", err);
+                    window.floodrunner_permission_status = 2;
                 });
-        } else if ('DeviceOrientationEvent' in window) {
-            window.floodrunner_motion_allowed = true;
-            window.addEventListener('deviceorientation', function(e) {
-                if (e.gamma !== null && e.gamma !== undefined) {
-                    window.floodrunner_gamma = e.gamma;
-                }
-            }, true);
+        } else {
+            // Standard non-iOS browsers (e.g. Android Chrome)
+            window.floodrunner_permission_status = 1;
+            window.addEventListener('deviceorientation', window.onOrientationEvent, true);
+            var btn = document.getElementById('floodrunner-motion-btn');
+            if (btn) {
+                btn.innerText = 'Gyro: Active';
+                btn.style.backgroundColor = 'rgba(20, 140, 60, 0.9)';
+                setTimeout(function() { if (btn) btn.style.display = 'none'; }, 2000);
+            }
         }
     };
 
+    // Create a prominent DOM overlay button directly on document.body for iOS permission user gesture
+    if (typeof document !== 'undefined' && document.body) {
+        var existingBtn = document.getElementById('floodrunner-motion-btn');
+        if (!existingBtn) {
+            var btn = document.createElement('button');
+            btn.id = 'floodrunner-motion-btn';
+            btn.innerHTML = '&#x1F4F1; Enable Gyro / Tilt Controls';
+            btn.style.position = 'fixed';
+            btn.style.top = '14px';
+            btn.style.right = '14px';
+            btn.style.zIndex = '999999';
+            btn.style.padding = '10px 16px';
+            btn.style.fontSize = '14px';
+            btn.style.fontWeight = 'bold';
+            btn.style.fontFamily = 'Arial, sans-serif';
+            btn.style.color = '#ffffff';
+            btn.style.backgroundColor = 'rgba(15, 75, 160, 0.92)';
+            btn.style.border = '2px solid #60b0ff';
+            btn.style.borderRadius = '8px';
+            btn.style.boxShadow = '0 4px 14px rgba(0,0,0,0.6)';
+            btn.style.cursor = 'pointer';
+            btn.style.userSelect = 'none';
+            btn.style.webkitUserSelect = 'none';
+
+            var directHandler = function(e) {
+                if (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                window.requestFloodRunnerMotion();
+            };
+
+            btn.addEventListener('click', directHandler, { passive: false });
+            btn.addEventListener('touchend', directHandler, { passive: false });
+
+            document.body.appendChild(btn);
+        }
+
+        // Global touch handler on document to capture first touch gesture
+        var docTouchHandler = function() {
+            if (window.floodrunner_permission_status === 0) {
+                window.requestFloodRunnerMotion();
+            }
+            document.removeEventListener('touchend', docTouchHandler);
+        };
+        document.addEventListener('touchend', docTouchHandler, { passive: true });
+    }
+
+    // Auto-register on platforms that do not require explicit requestPermission
     if (window.floodrunner_motion_supported && typeof DeviceOrientationEvent.requestPermission !== 'function') {
         window.requestFloodRunnerMotion();
     }
 });
 
-EM_JS(float, GetWebDeviceGamma, (), {
+EM_JS(float, GetWebDeviceTilt, (), {
     return (typeof window.floodrunner_gamma === 'number') ? window.floodrunner_gamma : 0.0;
 });
 
-EM_JS(bool, IsWebMotionActive, (), {
-    return !!window.floodrunner_motion_allowed;
+EM_JS(float, GetWebRawGamma, (), {
+    return (typeof window.floodrunner_raw_gamma === 'number') ? window.floodrunner_raw_gamma : 0.0;
 });
 
-EM_JS(void, TriggerWebMotionRequest, (), {
+EM_JS(float, GetWebRawBeta, (), {
+    return (typeof window.floodrunner_raw_beta === 'number') ? window.floodrunner_raw_beta : 0.0;
+});
+
+EM_JS(int, GetWebScreenAngle, (), {
+    return (typeof window.floodrunner_screen_angle === 'number') ? window.floodrunner_screen_angle : 0;
+});
+
+EM_JS(bool, IsWebMotionSupported, (), {
+    return !!window.floodrunner_motion_supported;
+});
+
+EM_JS(int, GetWebPermissionStatus, (), {
+    return (typeof window.floodrunner_permission_status === 'number') ? window.floodrunner_permission_status : 0;
+});
+
+EM_JS(int, GetWebOrientationEventCount, (), {
+    return (typeof window.floodrunner_event_count === 'number') ? window.floodrunner_event_count : 0;
+});
+
+EM_JS(void, RequestDOMMotionPermission, (), {
     if (window.requestFloodRunnerMotion) {
         window.requestFloodRunnerMotion();
     }
@@ -150,8 +271,8 @@ float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
         touch.currentPos = pos;
 
 #if defined(__EMSCRIPTEN__)
-        // Trigger motion permission on first user tap (required for iOS Safari)
-        TriggerWebMotionRequest();
+        // Trigger motion permission on user tap (for non-iOS or fallback)
+        RequestDOMMotionPermission();
 #endif
 
         if (isGameOver) {
@@ -188,10 +309,10 @@ float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
 // Platform-independent gyro/device orientation sensor reading abstraction
 float GetGyroSteeringInput() {
 #if defined(__EMSCRIPTEN__)
-    float gamma = GetWebDeviceGamma();
-    // gamma is left/right tilt angle in degrees (-90 to +90)
+    float tilt = GetWebDeviceTilt();
+    // tilt is left/right tilt angle in degrees (-90 to +90)
     // ~25 degrees tilt corresponds to full lateral steering
-    return Clamp(gamma / 25.0f, -1.0f, 1.0f);
+    return Clamp(tilt / 25.0f, -1.0f, 1.0f);
 #elif defined(PLATFORM_ANDROID) || defined(__ANDROID__)
     return 0.0f;
 #elif defined(PLATFORM_IOS) || defined(__APPLE__)
@@ -819,16 +940,44 @@ void UpdateDrawFrame() {
 
         DrawFPS(GetScreenWidth() - 100, 20);
 
-        // Motion Controls Prompt Button (top-right next to FPS)
 #if defined(__EMSCRIPTEN__)
+        // Motion / Gyro Diagnostic Overlay Panel (top-left below main HUD)
+        int diagY = 245;
+        DrawRectangle(15, diagY, 340, 125, Fade((Color){ 12, 16, 28, 255 }, 0.88f));
+        DrawRectangleLines(15, diagY, 340, 125, (Color){ 80, 160, 240, 255 });
+
+        DrawText("MOTION / GYRO DIAGNOSTICS", 25, diagY + 8, 14, (Color){ 100, 220, 255, 255 });
+
+        bool supported = IsWebMotionSupported();
+        int permStatus = GetWebPermissionStatus();
+        const char* permStr = "0: Not Requested";
+        Color permColor = YELLOW;
+        if (!supported || permStatus == 3) { permStr = "3: Unsupported"; permColor = RED; }
+        else if (permStatus == 1) { permStr = "1: GRANTED / ACTIVE"; permColor = GREEN; }
+        else if (permStatus == 2) { permStr = "2: DENIED"; permColor = RED; }
+
+        int evCount = GetWebOrientationEventCount();
+        float rawG = GetWebRawGamma();
+        float rawB = GetWebRawBeta();
+        int screenAngle = GetWebScreenAngle();
+        float calcTilt = GetWebDeviceTilt();
+
+        DrawText(TextFormat("Support: %s | Perm: %s", supported ? "YES" : "NO", permStr), 25, diagY + 28, 12, permColor);
+        DrawText(TextFormat("Events Received: %d (%s)", evCount, evCount > 0 ? "LIVE" : "WAITING"), 25, diagY + 46, 12, evCount > 0 ? GREEN : ORANGE);
+        DrawText(TextFormat("Orientation Angle: %d deg", screenAngle), 25, diagY + 64, 12, RAYWHITE);
+        DrawText(TextFormat("Raw Gamma: %.1f | Beta: %.1f", rawG, rawB), 25, diagY + 82, 12, (Color){ 200, 220, 255, 255 });
+        DrawText(TextFormat("Active Tilt: %.1f deg | Steer: %.2f", calcTilt, g.gyro.filteredInput), 25, diagY + 100, 12, (Color){ 255, 215, 0, 255 });
+
+        // Motion Controls Prompt Button (top-right next to FPS)
         Rectangle motionBtn = { (float)GetScreenWidth() - 220, 50, 205, 30 };
         Vector2 mousePos = GetMousePosition();
         bool hovered = CheckCollisionPointRec(mousePos, motionBtn);
         DrawRectangleRec(motionBtn, hovered ? (Color){ 45, 75, 120, 230 } : (Color){ 25, 40, 70, 200 });
         DrawRectangleLinesEx(motionBtn, 1, (Color){ 100, 200, 255, 255 });
-        DrawText(IsWebMotionActive() ? "Gyro: Active" : "Enable Motion / Gyro", motionBtn.x + 15, motionBtn.y + 8, 13, (Color){ 200, 240, 255, 255 });
+        const char* btnLabel = (permStatus == 1) ? "Gyro: Active" : "Enable Motion / Gyro";
+        DrawText(btnLabel, motionBtn.x + 15, motionBtn.y + 8, 13, (Color){ 200, 240, 255, 255 });
         if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            TriggerWebMotionRequest();
+            RequestDOMMotionPermission();
         }
 #endif
 
