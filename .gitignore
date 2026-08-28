@@ -49,3 +49,9 @@ FBX2glTF/
 # Preserve Game Assets Directory
 !assets/
 !assets/**
+
+# Web Build & Dependencies
+build-web/
+third_party/
+test_out.txt
+test_err.txt

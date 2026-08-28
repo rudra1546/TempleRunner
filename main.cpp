@@ -23,8 +23,6 @@ struct Coin {
 struct PlayerCharacter {
     Vector3 position;
     float collisionRadius;
-    int currentLane;      // 0 = Visually Left (+2.8f), 1 = Center (0.0f), 2 = Visually Right (-2.8f)
-    float targetX;        // Target X coordinate for smooth lane sliding
     float verticalVelocity;
     bool isGrounded;
 
@@ -44,17 +42,188 @@ struct PlayerCharacter {
     Vector3 drawOffset; // Vertical offset to align feet with ground (y=0)
 };
 
-// Natural Mountain Valley Environment System
+// Mountain Valley Mass System state
 struct MountainValleySystem {
-    Model leftMountainModel;
-    Model rightMountainModel;
-    BoundingBox leftBbox;
-    BoundingBox rightBbox;
-    float leftPosX;
-    float rightPosX;
     bool isLoaded;
-    Vector3 mountainSize;
+    float segLength;
 };
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
+
+EM_JS(void, InitWebOrientationBridge, (), {
+    window.floodrunner_gamma = 0.0;
+    window.floodrunner_motion_allowed = false;
+    window.floodrunner_motion_supported = ('DeviceOrientationEvent' in window);
+
+    window.requestFloodRunnerMotion = function() {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+            DeviceOrientationEvent.requestPermission()
+                .then(function(state) {
+                    if (state === 'granted') {
+                        window.floodrunner_motion_allowed = true;
+                        window.addEventListener('deviceorientation', function(e) {
+                            if (e.gamma !== null && e.gamma !== undefined) {
+                                window.floodrunner_gamma = e.gamma;
+                            }
+                        }, true);
+                    }
+                })
+                .catch(function(err) {
+                    console.warn("Motion permission error:", err);
+                });
+        } else if ('DeviceOrientationEvent' in window) {
+            window.floodrunner_motion_allowed = true;
+            window.addEventListener('deviceorientation', function(e) {
+                if (e.gamma !== null && e.gamma !== undefined) {
+                    window.floodrunner_gamma = e.gamma;
+                }
+            }, true);
+        }
+    };
+
+    if (window.floodrunner_motion_supported && typeof DeviceOrientationEvent.requestPermission !== 'function') {
+        window.requestFloodRunnerMotion();
+    }
+});
+
+EM_JS(float, GetWebDeviceGamma, (), {
+    return (typeof window.floodrunner_gamma === 'number') ? window.floodrunner_gamma : 0.0;
+});
+
+EM_JS(bool, IsWebMotionActive, (), {
+    return !!window.floodrunner_motion_allowed;
+});
+
+EM_JS(void, TriggerWebMotionRequest, (), {
+    if (window.requestFloodRunnerMotion) {
+        window.requestFloodRunnerMotion();
+    }
+});
+#endif
+
+// ==============================================================================
+// Web & Mobile Input System (Keyboard + Touch Drag + Gyroscope Orientation)
+// ==============================================================================
+
+struct GyroSteeringSystem {
+    float sensitivity = 1.5f;       // Configurable device tilt multiplier
+    float deadzone = 0.08f;         // Neutral zone to eliminate noise when device is held flat
+    float filteredInput = 0.0f;     // Low-pass filtered normalized lateral input [-1.0f, +1.0f]
+    float filterSpeed = 15.0f;      // Responsiveness factor for sensor smoothing
+    bool isAvailable = false;       // Set true if physical mobile sensor is active
+};
+
+struct TouchSteeringState {
+    bool isTouching = false;
+    Vector2 touchStartPos = { 0.0f, 0.0f };
+    Vector2 currentPos = { 0.0f, 0.0f };
+    float lateralInput = 0.0f;      // [-1.0f (Left), +1.0f (Right)]
+    bool jumpTriggered = false;
+    bool tapRestartTriggered = false;
+};
+
+// Keyboard lateral steering: -1.0f (Left) to +1.0f (Right)
+float GetKeyboardSteering() {
+    float steer = 0.0f;
+    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) steer -= 1.0f;
+    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) steer += 1.0f;
+    return steer;
+}
+
+// Touch lateral drag/hold steering: -1.0f (Left) to +1.0f (Right)
+float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
+    bool isDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || (GetTouchPointCount() > 0);
+    bool isPressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    Vector2 pos = GetMousePosition();
+    if (GetTouchPointCount() > 0) {
+        pos = GetTouchPosition(0);
+    }
+
+    touch.jumpTriggered = false;
+    touch.tapRestartTriggered = false;
+
+    if (isPressed) {
+        touch.isTouching = true;
+        touch.touchStartPos = pos;
+        touch.currentPos = pos;
+
+#if defined(__EMSCRIPTEN__)
+        // Trigger motion permission on first user tap (required for iOS Safari)
+        TriggerWebMotionRequest();
+#endif
+
+        if (isGameOver) {
+            touch.tapRestartTriggered = true;
+        } else {
+            // Tap top 35% of screen to jump
+            if (pos.y < (float)GetScreenHeight() * 0.35f) {
+                touch.jumpTriggered = true;
+            }
+        }
+    }
+
+    if (isDown && touch.isTouching) {
+        touch.currentPos = pos;
+        float deltaX = pos.x - touch.touchStartPos.x;
+        float dragThreshold = (float)GetScreenWidth() * 0.10f; // 10% screen width drag = full deflection
+
+        if (fabsf(deltaX) > 4.0f) {
+            touch.lateralInput = Clamp(deltaX / dragThreshold, -1.0f, 1.0f);
+        } else {
+            // Direct screen half hold fallback if not dragging
+            float screenCenter = (float)GetScreenWidth() * 0.5f;
+            float distFromCenter = (pos.x - screenCenter) / (screenCenter * 0.75f);
+            touch.lateralInput = Clamp(distFromCenter, -1.0f, 1.0f);
+        }
+    } else {
+        touch.isTouching = false;
+        touch.lateralInput = 0.0f;
+    }
+
+    return touch.lateralInput;
+}
+
+// Platform-independent gyro/device orientation sensor reading abstraction
+float GetGyroSteeringInput() {
+#if defined(__EMSCRIPTEN__)
+    float gamma = GetWebDeviceGamma();
+    // gamma is left/right tilt angle in degrees (-90 to +90)
+    // ~25 degrees tilt corresponds to full lateral steering
+    return Clamp(gamma / 25.0f, -1.0f, 1.0f);
+#elif defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+    return 0.0f;
+#elif defined(PLATFORM_IOS) || defined(__APPLE__)
+    return 0.0f;
+#else
+    return 0.0f;
+#endif
+}
+
+// Update filtered gyro lateral steering value each frame
+// Output: normalized lateral steering in range [-1.0f (Left), +1.0f (Right)]
+float UpdateGyroSteering(GyroSteeringSystem& gyro, float deltaTime) {
+    float rawInput = GetGyroSteeringInput();
+    
+    // Check deadzone
+    if (fabsf(rawInput) < gyro.deadzone) {
+        rawInput = 0.0f;
+    } else {
+        // Remap output past deadzone smoothly to [0, 1]
+        float sign = (rawInput > 0.0f) ? 1.0f : -1.0f;
+        rawInput = sign * (fabsf(rawInput) - gyro.deadzone) / (1.0f - gyro.deadzone);
+    }
+
+    // Apply sensitivity
+    rawInput = Clamp(rawInput * gyro.sensitivity, -1.0f, 1.0f);
+
+    // Low-pass exponential smoothing filter to eliminate sensor jitter
+    float filterAlpha = Clamp(gyro.filterSpeed * deltaTime, 0.0f, 1.0f);
+    gyro.filteredInput = Lerp(gyro.filteredInput, rawInput, filterAlpha);
+
+    return gyro.filteredInput;
+}
 
 // Sphere vs AABB Box 3D Collision Check
 bool CheckCollisionSphereBox(Vector3 center, float radius, BoundingBox box) {
@@ -73,8 +242,6 @@ bool CheckCollisionSphereBox(Vector3 center, float radius, BoundingBox box) {
 bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
     player.collisionRadius = 0.9f;
-    player.currentLane = 1; // Start in Center Lane (0.0f)
-    player.targetX = 0.0f;
     player.verticalVelocity = 0.0f;
     player.isGrounded = true;
     player.isModelLoaded = false;
@@ -143,170 +310,15 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     return true;
 }
 
-// Generate Large Organic 3D Mountain Valley Wall Mesh with Realistic Sandstone Strata & Lighting Shading
-Model GenerateMountainValleyModel(bool isLeftSide, Vector3 size) {
-    const int width = 128;
-    const int height = 256;
-
-    // Generate multi-octave Perlin noise heightmaps for rugged fractal mountain peaks
-    Image perlin1 = GenImagePerlinNoise(width, height, isLeftSide ? 0 : 500, 0, 3.5f);
-    Image perlin2 = GenImagePerlinNoise(width, height, isLeftSide ? 250 : 750, 100, 8.0f);
-    Image perlin3 = GenImagePerlinNoise(width, height, isLeftSide ? 400 : 900, 200, 18.0f);
-
-    Color* pix1 = LoadImageColors(perlin1);
-    Color* pix2 = LoadImageColors(perlin2);
-    Color* pix3 = LoadImageColors(perlin3);
-
-    Color* pixels = (Color*)RL_MALLOC(width * height * sizeof(Color));
-
-    // Sculpt natural canyon cliff profile (road-facing inner edge u=0 has zero height, outer peak edge u=1 has max height)
-    for (int z = 0; z < height; z++) {
-        for (int x = 0; x < width; x++) {
-            int idx = z * width + x;
-            float n1 = (float)pix1[idx].r / 255.0f;
-            float n2 = (float)pix2[idx].r / 255.0f;
-            float n3 = (float)pix3[idx].r / 255.0f;
-
-            // Multi-fractal noise synthesis
-            float rawVal = n1 * 0.60f + n2 * 0.28f + n3 * 0.12f;
-
-            // u = 0 for road-facing inner edge, u = 1 for outer mountain peak edge
-            float normX = (float)x / (float)(width - 1);
-            float u = isLeftSide ? (1.0f - normX) : normX;
-
-            // Height slope curve (u=0 -> 0 height near road, u=1 -> max height at outer edge)
-            float heightSlope = powf(u, 1.8f);
-            float finalFactor = rawVal * heightSlope;
-
-            // Explicitly force the first ~25% (u < 0.25) to remain flat/low at ground level
-            if (u < 0.25f) {
-                finalFactor *= (u / 0.25f);
-            }
-
-            unsigned char hVal = (unsigned char)Clamp(finalFactor * 255.0f, 0.0f, 255.0f);
-            pixels[idx] = (Color){ hVal, hVal, hVal, 255 };
-        }
-    }
-
-    UnloadImageColors(pix1);
-    UnloadImageColors(pix2);
-    UnloadImageColors(pix3);
-    UnloadImage(perlin1);
-    UnloadImage(perlin2);
-    UnloadImage(perlin3);
-
-    Image customHeightmap = {
-        .data = pixels,
-        .width = width,
-        .height = height,
-        .mipmaps = 1,
-        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
-    };
-
-    Mesh mesh = GenMeshHeightmap(customHeightmap, size);
-    UnloadImage(customHeightmap); // Unload calls RL_FREE on pixels
-
-    // Apply realistic sandstone geological strata coloring & directional sun lighting to vertices
-    if (mesh.colors != nullptr && mesh.vertices != nullptr) {
-        // Directional sun vector for canyon wall illumination
-        Vector3 sunDir = Vector3Normalize((Vector3){ -0.5f, 0.75f, -0.4f });
-
-        for (int i = 0; i < mesh.vertexCount; i++) {
-            float vx = mesh.vertices[i * 3 + 0];
-            float vy = mesh.vertices[i * 3 + 1];
-            float vz = mesh.vertices[i * 3 + 2];
-
-            // Extract vertex normal vector
-            Vector3 normal = { 0.0f, 1.0f, 0.0f };
-            if (mesh.normals != nullptr) {
-                normal = (Vector3){
-                    mesh.normals[i * 3 + 0],
-                    mesh.normals[i * 3 + 1],
-                    mesh.normals[i * 3 + 2]
-                };
-            }
-
-            // Directional sun lighting factor
-            float diff = Vector3DotProduct(normal, sunDir);
-            float lightFactor = Clamp(diff * 0.55f + 0.45f, 0.25f, 1.0f);
-
-            // Geological sandstone strata layer calculation (horizontal wavy bands)
-            float strataWave = sinf(vy * 0.42f + vx * 0.05f + vz * 0.03f);
-
-            // Sandstone palette interpolation
-            Vector3 baseCol;
-            if (strataWave > 0.35f) {
-                // Bright Tan / Beige Sandstone Layer
-                baseCol = (Vector3){ 208.0f, 162.0f, 112.0f };
-            } else if (strataWave > -0.25f) {
-                // Rich Terracotta Red / Orange Sandstone Strata
-                baseCol = (Vector3){ 182.0f, 96.0f, 54.0f };
-            } else {
-                // Dark Weathered Brown Basalt / Iron Rock Layer
-                baseCol = (Vector3){ 98.0f, 58.0f, 38.0f };
-            }
-
-            // Slope shading: Sheer vertical cliffs receive darker crevice shadows
-            float slopeFactor = Clamp(normal.y, 0.0f, 1.0f);
-            if (slopeFactor < 0.45f) {
-                float crevice = (0.45f - slopeFactor) / 0.45f;
-                baseCol = Vector3Lerp(baseCol, (Vector3){ 48.0f, 30.0f, 20.0f }, crevice * 0.65f);
-            }
-
-            // Apply directional sun lighting
-            baseCol.x *= lightFactor;
-            baseCol.y *= lightFactor;
-            baseCol.z *= lightFactor;
-
-            mesh.colors[i * 4 + 0] = (unsigned char)Clamp(baseCol.x, 0.0f, 255.0f);
-            mesh.colors[i * 4 + 1] = (unsigned char)Clamp(baseCol.y, 0.0f, 255.0f);
-            mesh.colors[i * 4 + 2] = (unsigned char)Clamp(baseCol.z, 0.0f, 255.0f);
-            mesh.colors[i * 4 + 3] = 255;
-        }
-    }
-
-    Model model = LoadModelFromMesh(mesh);
-    return model;
-}
-
-// Initialize Natural Mountain Valley Environment System
+// Initialize Mountain Environment System (Mountain geometry removed for open map visibility)
 void InitMountainValleySystem(MountainValleySystem& valley) {
-    valley.mountainSize = (Vector3){ 48.0f, 42.0f, 160.0f }; // Width 48m, Peak Height 42m, Segment Length 160m
-
-    valley.leftMountainModel = GenerateMountainValleyModel(true, valley.mountainSize);
-    valley.rightMountainModel = GenerateMountainValleyModel(false, valley.mountainSize);
-
-    valley.leftBbox = GetModelBoundingBox(valley.leftMountainModel);
-    valley.rightBbox = GetModelBoundingBox(valley.rightMountainModel);
-
-    TraceLog(LOG_INFO, "Left Mountain bbox min=(%.2f %.2f %.2f) max=(%.2f %.2f %.2f)",
-             valley.leftBbox.min.x, valley.leftBbox.min.y, valley.leftBbox.min.z,
-             valley.leftBbox.max.x, valley.leftBbox.max.y, valley.leftBbox.max.z);
-
-    TraceLog(LOG_INFO, "Right Mountain bbox min=(%.2f %.2f %.2f) max=(%.2f %.2f %.2f)",
-             valley.rightBbox.min.x, valley.rightBbox.min.y, valley.rightBbox.min.z,
-             valley.rightBbox.max.x, valley.rightBbox.max.y, valley.rightBbox.max.z);
-
-    // HARD GEOMETRIC GUARANTEE:
-    // leftPos.x + leftMaxX <= -15.0f  ==> leftPos.x = -15.0f - leftBbox.max.x
-    // rightPos.x + rightMinX >= 15.0f ==> rightPos.x = 15.0f - rightBbox.min.x
-    valley.leftPosX = -15.0f - valley.leftBbox.max.x;
-    valley.rightPosX = 15.0f - valley.rightBbox.min.x;
-
-    TraceLog(LOG_INFO, "HARD GEOMETRIC GUARANTEE: LeftPosX = %.2f (Max Mesh X = %.2f <= -15.0m), RightPosX = %.2f (Min Mesh X = %.2f >= +15.0m)",
-             valley.leftPosX, valley.leftPosX + valley.leftBbox.max.x,
-             valley.rightPosX, valley.rightPosX + valley.rightBbox.min.x);
-
-    valley.isLoaded = true;
+    valley.segLength = 160.0f;
+    valley.isLoaded = false;
 }
 
 // Unload Mountain Valley Models
 void UnloadMountainValleySystem(MountainValleySystem& valley) {
-    if (valley.isLoaded) {
-        UnloadModel(valley.leftMountainModel);
-        UnloadModel(valley.rightMountainModel);
-        valley.isLoaded = false;
-    }
+    valley.isLoaded = false;
 }
 
 // Update Skeletal Model Animation Frame for pure In-Place running cycle
@@ -353,6 +365,31 @@ void UnloadPlayerCharacter(PlayerCharacter& player) {
     }
 }
 
+// Helper: Fast Deterministic Pseudorandom Generator for Segment Decoration
+inline unsigned int HashSegment(int segmentIndex, unsigned int salt) {
+    unsigned int h = (unsigned int)segmentIndex * 2654435761u + salt * 1013904223u;
+    h ^= (h >> 16);
+    h *= 0x85ebca6bu;
+    h ^= (h >> 13);
+    return h;
+}
+
+// Helper function to render a road curb with gold trim wireframe
+void DrawCurb(Vector3 pos, Vector3 size) {
+    Color curbColor = (Color){ 75, 70, 62, 255 };
+    Color goldTrimColor = (Color){ 195, 145, 50, 255 };
+    DrawCube(pos, size.x, size.y, size.z, curbColor);
+    DrawCubeWires(pos, size.x, size.y, size.z, goldTrimColor);
+}
+
+// Helper function to render a single sandstone road tile
+void DrawTileSurface(Vector3 centerPos, float widthX, float widthZ, int index) {
+    Color tileColor = (index % 2 == 0) ? (Color){ 145, 130, 110, 255 } : (Color){ 128, 115, 96, 255 };
+    Color wireColor = (Color){ 65, 55, 45, 255 };
+    DrawCube(centerPos, widthX, 1.0f, widthZ, tileColor);
+    DrawCubeWires(centerPos, widthX, 1.0f, widthZ, wireColor);
+}
+
 // Helper function to render a colored 3D quad using Raylib rlgl
 void DrawQuad3D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, Color color) {
     rlSetTexture(0);
@@ -365,22 +402,37 @@ void DrawQuad3D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, Color color) {
     rlEnd();
 }
 
-// Render Continuous Animated Canyon River & Sandy Banks (Parallel to road on RIGHT side: X = +8.0m to +13.5m)
-void DrawRiverAndBanks(float playerZ, float time) {
-    const float riverStartX = 8.0f;
-    const float riverWidth  = 5.5f;
-    const float riverEndX   = riverStartX + riverWidth; // +13.5m (well inside mountain exclusion zone +15.0m!)
+// Helper function to check if player position is on solid road ground for 90-Degree L-Shaped Map
+inline bool IsOnRoadSurface(Vector3 pos) {
+    // 1. Straight Road Segment (0m <= Z <= 503m, X centered at 0 within 3.5m)
+    if (pos.z >= -10.0f && pos.z <= 503.0f) {
+        if (pos.x >= -3.5f && pos.x <= 3.5f) return true;
+    }
+    // 2. 90-Degree Turn Corner & Turned Horizontal Path (Z approx 500m, X extending along +X from -3.5m to 350m)
+    if (pos.z >= 496.5f && pos.z <= 503.5f) {
+        if (pos.x >= -3.5f && pos.x <= 350.0f) return true;
+    }
+    return false;
+}
 
-    // --- 1. Natural Sandy / Wet Riverbed Banks (X = +5.4m to +14.0m) ---
+// Render Continuous Animated Canyon River & Sandy Banks
+void DrawRiverAndBanks(float playerZ, float time) {
+    const float riverWidth = 5.5f;
+
+    // --- 1. Natural Sandy / Wet Riverbed Banks ---
     const float segLength = 6.0f;
     int startSeg = (int)((playerZ - 40.0f) / segLength);
     int endSeg   = (int)((playerZ + 240.0f) / segLength);
 
     for (int i = startSeg; i <= endSeg; i++) {
         float segZ = i * segLength + segLength / 2.0f;
+        if (segZ > 505.0f) continue; // End river at turn boundary
 
-        // Sandy shore bank between road curb and river
-        Vector3 bankPos = { 6.7f, -0.2f, segZ };
+        float riverStartX = -8.0f;
+        float riverEndX   = riverStartX - riverWidth;
+
+        // Sandy shore bank between right road curb and river
+        Vector3 bankPos = { -6.7f, -0.2f, segZ };
         DrawCube(bankPos, 2.6f, 0.5f, segLength, (Color){ 175, 140, 100, 255 });
         DrawCubeWires(bankPos, 2.6f, 0.5f, segLength, (Color){ 140, 110, 75, 255 });
 
@@ -397,104 +449,420 @@ void DrawRiverAndBanks(float playerZ, float time) {
     for (int q = startQuad; q <= endQuad; q++) {
         float z1 = q * quadLength;
         float z2 = z1 + quadLength;
+        if (z1 > 505.0f) continue;
 
-        // Animate vertical water wave oscillation
+        float riverStartX1 = -8.0f;
+        float riverEndX1   = riverStartX1 - riverWidth;
+        float riverStartX2 = -8.0f;
+        float riverEndX2   = riverStartX2 - riverWidth;
+
         float waveY1 = 0.04f + 0.035f * sinf(z1 * 0.25f + time * 3.2f);
         float waveY2 = 0.04f + 0.035f * sinf(z2 * 0.25f + time * 3.2f);
 
-        // Water surface main body (Teal / Deep Canyon Water)
-        Vector3 p1 = { riverStartX, waveY1, z1 };
-        Vector3 p2 = { riverEndX,   waveY1, z1 };
-        Vector3 p3 = { riverEndX,   waveY2, z2 };
-        Vector3 p4 = { riverStartX, waveY2, z2 };
+        Vector3 p1 = { riverStartX1, waveY1, z1 };
+        Vector3 p2 = { riverEndX1,   waveY1, z1 };
+        Vector3 p3 = { riverEndX2,   waveY2, z2 };
+        Vector3 p4 = { riverStartX2, waveY2, z2 };
 
         Color waterCol = (Color){ 30, 125, 165, 220 };
         DrawQuad3D(p1, p2, p3, p4, waterCol);
 
-        // Lighter aqua foam / water ripple highlights along river center
-        float midX1 = riverStartX + 1.2f + 0.5f * sinf(z1 * 0.4f + time * 2.0f);
-        float midX2 = riverStartX + 3.8f + 0.5f * cosf(z2 * 0.4f + time * 2.0f);
+        float midX1 = riverStartX1 - 1.2f - 0.5f * sinf(z1 * 0.4f + time * 2.0f);
+        float midX2 = riverStartX2 - 3.8f - 0.5f * cosf(z2 * 0.4f + time * 2.0f);
 
         Vector3 r1 = { midX1, waveY1 + 0.005f, z1 };
-        Vector3 r2 = { midX2, waveY1 + 0.005f, z1 };
-        Vector3 r3 = { midX2, waveY2 + 0.005f, z2 };
-        Vector3 r4 = { midX1, waveY2 + 0.005f, z2 };
+        Vector3 r2 = { midX1 - 2.5f, waveY1 + 0.005f, z1 };
+        Vector3 r3 = { midX2 - 2.5f, waveY2 + 0.005f, z2 };
+        Vector3 r4 = { midX2, waveY2 + 0.005f, z2 };
 
         Color rippleCol = (Color){ 100, 210, 240, 180 };
         DrawQuad3D(r1, r2, r3, r4, rippleCol);
     }
 }
 
-// Render Ancient Sandstone Road & Large Continuous Mountain Valley (Zero Obstructive Collisions)
+// Render Clean 90-Degree L-Shaped Road Environment (Zero Overlaps, Zero Obstructions, Zero Trees)
 void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float playerZ, float roadWidth) {
-    const float roadHalfWidth = roadWidth / 2.0f;
-
-    // --- 1. Ancient Sandstone Tile Road ---
+    const float narrowPathWidth = 6.0f; // 6.0m path width (X in [-3.0, 3.0] on straight, Z in [497.0, 503.0] on turned)
     const float tileLength = 6.0f;
-    int startTile = (int)((playerZ - 40.0f) / tileLength);
-    int endTile = (int)((playerZ + 250.0f) / tileLength);
 
-    for (int i = startTile; i <= endTile; i++) {
-        float tileZ = i * tileLength + tileLength / 2.0f;
-        Vector3 tilePos = { 0.0f, -0.5f, tileZ };
+    // --- 1. Straight Road Segment (0m <= Z < 497.0m) ---
+    float minRenderZ = fmaxf(0.0f, playerZ - 40.0f);
+    float maxRenderZ = fminf(497.0f, playerZ + 250.0f);
 
-        // Alternating worn sandstone tile tones
-        Color tileColor = (i % 2 == 0) ? (Color){ 145, 130, 110, 255 } : (Color){ 128, 115, 96, 255 };
-        Color wireColor = (Color){ 65, 55, 45, 255 };
+    for (float z = 0.0f; z < 497.0f; z += tileLength) {
+        float nextZ = fminf(z + tileLength, 497.0f);
+        float len = nextZ - z;
+        float centerZ = z + len / 2.0f;
 
-        DrawCube(tilePos, roadWidth, 1.0f, tileLength, tileColor);
-        DrawCubeWires(tilePos, roadWidth, 1.0f, tileLength, wireColor);
+        if (centerZ + len / 2.0f < minRenderZ || centerZ - len / 2.0f > maxRenderZ) continue;
 
-        // Ancient Gold Border Trims & Side Curbs
-        Vector3 leftCurb = { -roadHalfWidth - 0.45f, 0.35f, tileZ };
-        Vector3 rightCurb = { roadHalfWidth + 0.45f, 0.35f, tileZ };
-        Color curbColor = (Color){ 75, 70, 62, 255 };
-        Color goldTrimColor = (Color){ 195, 145, 50, 255 };
+        int tileIdx = (int)(z / tileLength);
+        DrawTileSurface((Vector3){ 0.0f, -0.5f, centerZ }, narrowPathWidth, len, tileIdx);
 
-        DrawCube(leftCurb, 0.9f, 0.7f, tileLength, curbColor);
-        DrawCubeWires(leftCurb, 0.9f, 0.7f, tileLength, goldTrimColor);
+        // West curb (Right side when running +Z, X = -3.45m)
+        DrawCurb((Vector3){ -3.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
 
-        DrawCube(rightCurb, 0.9f, 0.7f, tileLength, curbColor);
-        DrawCubeWires(rightCurb, 0.9f, 0.7f, tileLength, goldTrimColor);
+        // East curb (Left side when running +Z, X = +3.45m) - stops cleanly at Z = 497.0m!
+        DrawCurb((Vector3){ 3.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
     }
 
-    // --- 2. Tile Seams & Lane Seams ---
+    // --- 2. Clean 90-Degree Turn Corner Tile (Z in [497.0m, 503.0m], X in [-3.0m, 3.0m]) ---
+    if (playerZ + 250.0f >= 497.0f) {
+        // Corner road surface (seamlessly joins straight road at Z=497 and turned road at X=3.0)
+        DrawTileSurface((Vector3){ 0.0f, -0.5f, 500.0f }, narrowPathWidth, narrowPathWidth, 83);
+
+        // West Curb continuation (X = -3.45m, Z from 497 to 503)
+        DrawCurb((Vector3){ -3.45f, 0.35f, 500.0f }, (Vector3){ 0.9f, 0.7f, 6.0f });
+
+        // North Back Wall Curb (Z = 503.45m, X from -3.9m to 3.0m)
+        DrawCurb((Vector3){ -0.45f, 0.35f, 503.45f }, (Vector3){ 6.9f, 0.7f, 0.9f });
+        // (East side at X=+3.0m and South side at Z=497.0m are wide open for turning!)
+    }
+
+    // --- 3. Turned Horizontal Road Segment (X from 3.0m to 350.0m, centered at Z = 500.0m) ---
+    if (playerZ + 250.0f >= 480.0f) {
+        for (float x = 3.0f; x <= 350.0f; x += tileLength) {
+            float nextX = fminf(x + tileLength, 350.0f);
+            float len = nextX - x;
+            float centerX = x + len / 2.0f;
+            int tileIdx = (int)(x / tileLength);
+
+            // Road surface
+            DrawTileSurface((Vector3){ centerX, -0.5f, 500.0f }, len, narrowPathWidth, tileIdx);
+
+            // North Curb (Z = 503.45m)
+            DrawCurb((Vector3){ centerX, 0.35f, 503.45f }, (Vector3){ len, 0.7f, 0.9f });
+
+            // South Curb (Z = 496.55m)
+            DrawCurb((Vector3){ centerX, 0.35f, 496.55f }, (Vector3){ len, 0.7f, 0.9f });
+        }
+    }
+
+    // --- 4. Tile Seams ---
     float startSeamZ = floorf((playerZ - 30.0f) / 6.0f) * 6.0f;
-    float endSeamZ = playerZ + 220.0f;
+    float endSeamZ = fminf(playerZ + 220.0f, 497.0f);
     for (float z = startSeamZ; z <= endSeamZ; z += 6.0f) {
-        if (z < 0.0f) continue;
+        if (z < 0.0f || z > 497.0f) continue;
         Color seamColor = (fmodf(z, 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
-        DrawLine3D((Vector3){ -roadHalfWidth, 0.015f, z }, (Vector3){ roadHalfWidth, 0.015f, z }, seamColor);
+        DrawLine3D((Vector3){ -narrowPathWidth / 2.0f, 0.015f, z }, (Vector3){ narrowPathWidth / 2.0f, 0.015f, z }, seamColor);
     }
 
-    // Lane division lines (Visual guidance)
-    for (float z = startSeamZ; z <= endSeamZ; z += 12.0f) {
-        if (z < 0.0f) continue;
-        DrawLine3D((Vector3){ -1.4f, 0.015f, z }, (Vector3){ -1.4f, 0.015f, z + 6.0f }, (Color){ 100, 90, 75, 120 });
-        DrawLine3D((Vector3){ 1.4f, 0.015f, z }, (Vector3){ 1.4f, 0.015f, z + 6.0f }, (Color){ 100, 90, 75, 120 });
+    if (playerZ + 250.0f >= 480.0f) {
+        for (float x = 3.0f; x <= 350.0f; x += 6.0f) {
+            Color seamColor = (fmodf(x, 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
+            DrawLine3D((Vector3){ x, 0.015f, 497.0f }, (Vector3){ x, 0.015f, 503.0f }, seamColor);
+        }
+    }
+}
+
+struct GameState {
+    PlayerCharacter player;
+    MountainValleySystem valley;
+    GyroSteeringSystem gyro;
+    TouchSteeringState touch;
+
+    float forwardSpeed = 14.0f;
+    float jumpVelocity = 10.5f;
+    float gravity = -24.0f;
+    float roadWidth = 10.0f;
+    float horizontalSpeed = 10.0f;
+
+    float initialSpawnZ = 50.0f;
+    float nextSpawnZ = 50.0f;
+    std::vector<Obstacle> obstacles;
+
+    float coinRadius = 0.6f;
+    float coinHeight = 0.15f;
+    float coinFloatHeight = 1.0f;
+    float initialCoinSpawnZ = 30.0f;
+    float nextCoinSpawnZ = 30.0f;
+    std::vector<Coin> coins;
+
+    int score = 0;
+    bool isGameOver = false;
+    Camera3D camera;
+
+    void Reset() {
+        player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
+        player.rotationY = 0.0f;
+        player.verticalVelocity = 0.0f;
+        player.isGrounded = true;
+        player.animTime = 0.0f;
+        gyro.filteredInput = 0.0f;
+        touch.lateralInput = 0.0f;
+        obstacles.clear();
+        coins.clear();
+        nextSpawnZ = initialSpawnZ;
+        nextCoinSpawnZ = initialCoinSpawnZ;
+        score = 0;
+        isGameOver = false;
+    }
+};
+
+static GameState g_game;
+
+void UpdateDrawFrame() {
+    GameState& g = g_game;
+    float deltaTime = GetFrameTime();
+    if (deltaTime > 0.1f) deltaTime = 0.1f; // Cap delta time on slow frame or tab switch
+
+    // Restart listener (R key or touch tap when Game Over)
+    if (g.isGameOver) {
+        UpdateTouchSteering(g.touch, true);
+        if (IsKeyPressed(KEY_R) || g.touch.tapRestartTriggered) {
+            g.Reset();
+        }
     }
 
-    // --- 3. Render Continuous Animated Canyon River & Sandy Banks (Right Side X = +8.0m to +13.5m) ---
-    DrawRiverAndBanks(playerZ, (float)GetTime());
+    if (!g.isGameOver) {
+        // 1. Gather isolated inputs
+        float keyboardSteer = GetKeyboardSteering();
+        float touchSteer = UpdateTouchSteering(g.touch, false);
+        float gyroSteer = UpdateGyroSteering(g.gyro, deltaTime);
 
-    // --- 4. Rendering Large Continuous Mountain Valley Formations on Both Sides ---
-    if (!valley.isLoaded) return;
+        // Combined lateral steering: -1.0f (Left) to +1.0f (Right)
+        float lateralSteer = Clamp(keyboardSteer + touchSteer + gyroSteer, -1.0f, 1.0f);
 
-    const float segLength = valley.mountainSize.z;
-    int baseChunk = (int)(playerZ / segLength);
+        // 2. Road Progression & Direction Control
+        bool isOnTurnedPath = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
 
-    // Draw 3 continuous repeating mountain chunks along Z (covering playerZ - 60m to playerZ + 260m)
-    for (int c = -1; c <= 2; c++) {
-        float chunkZ = (baseChunk + c) * segLength;
+        if (!isOnTurnedPath) {
+            // Running forward along +Z on Straight Road (0m -> 500m)
+            g.player.position.z += g.forwardSpeed * deltaTime;
 
-        // Position Left Mountain Range (X centered at valley.leftPosX, guaranteed max mesh X <= -15.0m)
-        Vector3 leftPos = { valley.leftPosX, 0.0f, chunkZ };
-        DrawModel(valley.leftMountainModel, leftPos, 1.0f, WHITE);
+            // On Straight Road (+Z): Steer Left is +X, Steer Right is -X
+            g.player.position.x += (-lateralSteer) * g.horizontalSpeed * deltaTime;
 
-        // Position Right Mountain Range (X centered at valley.rightPosX, guaranteed min mesh X >= +15.0m)
-        Vector3 rightPos = { valley.rightPosX, 0.0f, chunkZ };
-        DrawModel(valley.rightMountainModel, rightPos, 1.0f, WHITE);
+            // Constrain player strictly within straight road width BEFORE reaching corner (Z < 496.5m)
+            if (g.player.position.z < 496.5f) {
+                g.player.position.x = Clamp(g.player.position.x, -3.0f, 3.0f);
+            }
+        } else {
+            // Running forward along +X on Turned Horizontal Road
+            g.player.position.x += g.forwardSpeed * deltaTime; // Auto forward running along +X!
+
+            // On Turned Road (+X): Steer Left is -Z, Steer Right is +Z
+            g.player.position.z += (lateralSteer) * g.horizontalSpeed * deltaTime;
+            g.player.position.z = Clamp(g.player.position.z, 497.0f, 503.0f);
+        }
+
+        // 3. Dynamic visual rotation matching movement trajectory and turn progression
+        // NOTE: Gyro and touch only control lateral position across road width; they NEVER rotate character or change road heading.
+        float targetRotationY = 0.0f;
+        if (!isOnTurnedPath) {
+            if (g.player.position.z >= 495.0f && g.player.position.x > -1.0f) {
+                // In turn zone: smoothly transition facing angle from 0 deg (+Z) to 90 deg (+X)
+                float turnProgress = Clamp((g.player.position.x + 1.0f) / 4.0f, 0.0f, 1.0f);
+                targetRotationY = turnProgress * 90.0f;
+                if (lateralSteer < -0.1f) {
+                    float moveYaw = atan2f(g.horizontalSpeed, g.forwardSpeed) * RAD2DEG; // ~35.5 deg
+                    targetRotationY = fmaxf(targetRotationY, moveYaw);
+                }
+            } else {
+                targetRotationY = 0.0f;
+            }
+        } else {
+            targetRotationY = 90.0f;
+        }
+
+        // Smoothly rotate character model to face travel direction without snapping or lagging
+        float rotLerpSpeed = Clamp(14.0f * deltaTime, 0.0f, 1.0f);
+        float angleDiff = fmodf(targetRotationY - g.player.rotationY + 180.0f, 360.0f) - 180.0f;
+        g.player.rotationY += angleDiff * rotLerpSpeed;
+
+        // Check if player has run off the road surface
+        if (g.player.position.y == 0.0f && !IsOnRoadSurface(g.player.position)) {
+            g.player.isGrounded = false;
+        }
+
+        // 4. Vertical Jump Physics (SPACE Key or Touch Tap)
+        if (g.player.isGrounded && (IsKeyPressed(KEY_SPACE) || g.touch.jumpTriggered)) {
+            g.player.verticalVelocity = g.jumpVelocity;
+            g.player.isGrounded = false;
+        }
+
+        if (!g.player.isGrounded) {
+            g.player.verticalVelocity += g.gravity * deltaTime;
+            g.player.position.y += g.player.verticalVelocity * deltaTime;
+
+            if (g.player.position.y <= 0.0f && IsOnRoadSurface(g.player.position)) {
+                g.player.position.y = 0.0f;
+                g.player.verticalVelocity = 0.0f;
+                g.player.isGrounded = true;
+            } else if (g.player.position.y < -15.0f) {
+                g.isGameOver = true;
+            }
+        }
+
+        // Update Skeletal Model Running Animation continuously (In-Place loop)
+        UpdatePlayerAnimation(g.player, true, deltaTime);
+
+        // 5. Dynamic Coin Sequence Spawning
+        const float spawnAheadDistance = 250.0f;
+        while (g.nextCoinSpawnZ < g.player.position.z + spawnAheadDistance) {
+            float coinX = (g.nextCoinSpawnZ <= 490.0f) ? 0.0f : (float)GetRandomValue(10, 250);
+            float coinZ = (g.nextCoinSpawnZ <= 490.0f) ? g.nextCoinSpawnZ : 500.0f;
+            int coinSequenceCount = GetRandomValue(3, 5);
+            float spacing = 4.5f;
+
+            for (int c = 0; c < coinSequenceCount; c++) {
+                Coin coin;
+                Vector3 cPos = (g.nextCoinSpawnZ <= 490.0f) ? (Vector3){ coinX, g.coinFloatHeight, coinZ + c * spacing } : (Vector3){ coinX + c * spacing, g.coinFloatHeight, coinZ };
+                coin.position = cPos;
+                coin.collected = false;
+                coin.rotation = (float)GetRandomValue(0, 360);
+                g.coins.push_back(coin);
+            }
+
+            g.nextCoinSpawnZ += coinSequenceCount * spacing + (float)GetRandomValue(15, 30);
+        }
+
+        // 6. Coin Rotation Animation & Collection Detection
+        for (auto& coin : g.coins) {
+            if (coin.collected) continue;
+
+            coin.rotation += 150.0f * deltaTime;
+            if (coin.rotation >= 360.0f) coin.rotation -= 360.0f;
+
+            Vector3 currentCoinPos = coin.position;
+            currentCoinPos.y += 0.15f * sinf(coin.rotation * (float)DEG2RAD * 2.0f);
+
+            Vector3 playerCenter = { g.player.position.x, g.player.position.y + 1.0f, g.player.position.z };
+            float hitRadius = g.player.collisionRadius + g.coinRadius;
+
+            if (Vector3DistanceSqr(playerCenter, currentCoinPos) <= hitRadius * hitRadius) {
+                coin.collected = true;
+                g.score++;
+            }
+        }
+
+        // Garbage collection
+        for (size_t i = 0; i < g.coins.size(); ) {
+            bool shouldErase = g.coins[i].collected;
+            if (!isOnTurnedPath) {
+                if (g.coins[i].position.z < g.player.position.z - 30.0f) shouldErase = true;
+            } else {
+                if (g.coins[i].position.x < g.player.position.x - 30.0f) shouldErase = true;
+            }
+            if (shouldErase) {
+                g.coins.erase(g.coins.begin() + i);
+            } else {
+                i++;
+            }
+        }
     }
+
+    // Camera Tracking
+    Vector3 desiredCamPos;
+    Vector3 desiredCamTarget;
+    bool isOnTurnedPath = (g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
+
+    if (!isOnTurnedPath) {
+        desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
+        desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
+    } else {
+        desiredCamPos = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 4.0f, g.player.position.z };
+        desiredCamTarget = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 1.0f, g.player.position.z };
+    }
+
+    float camLerpSpeed = Clamp(6.0f * deltaTime, 0.0f, 1.0f);
+    g.camera.position = Vector3Lerp(g.camera.position, desiredCamPos, camLerpSpeed);
+    g.camera.target   = Vector3Lerp(g.camera.target, desiredCamTarget, camLerpSpeed);
+
+    // ------------------------------------------------------------------------------
+    // Draw / Render
+    // ------------------------------------------------------------------------------
+    BeginDrawing();
+        ClearBackground((Color){ 165, 205, 235, 255 });
+
+        BeginMode3D(g.camera);
+            DrawMountainValleyEnvironment(g.valley, g.player.position.z, g.roadWidth);
+
+            for (const auto& coin : g.coins) {
+                if (coin.collected) continue;
+
+                float bobOffset = 0.15f * sinf(coin.rotation * (float)DEG2RAD * 2.0f);
+                Vector3 drawPos = { coin.position.x, coin.position.y + bobOffset, coin.position.z };
+
+                rlPushMatrix();
+                    rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
+                    rlRotatef(coin.rotation, 0.0f, 1.0f, 0.0f);
+                    rlRotatef(90.0f, 1.0f, 0.0f, 0.0f);
+
+                    DrawCylinder((Vector3){ 0, -g.coinHeight / 2.0f, 0 }, g.coinRadius, g.coinRadius, g.coinHeight, 16, (Color){ 255, 215, 0, 255 });
+                    DrawCylinderWires((Vector3){ 0, -g.coinHeight / 2.0f, 0 }, g.coinRadius + 0.01f, g.coinRadius + 0.01f, g.coinHeight + 0.01f, 16, (Color){ 220, 140, 0, 255 });
+                    DrawCircle3D((Vector3){ 0, g.coinHeight / 2.0f + 0.005f, 0 }, g.coinRadius * 0.55f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 245, 140, 255 });
+                    DrawCircle3D((Vector3){ 0, -g.coinHeight / 2.0f - 0.005f, 0 }, g.coinRadius * 0.55f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 245, 140, 255 });
+                rlPopMatrix();
+
+                DrawCircle3D((Vector3){ drawPos.x, 0.02f, drawPos.z }, g.coinRadius * 0.85f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 215, 0, 70 });
+            }
+
+            DrawPlayerCharacter(g.player);
+        EndMode3D();
+
+        // HUD Overlay
+        DrawRectangle(15, 15, 340, 222, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
+        DrawRectangleLines(15, 15, 340, 222, (Color){ 210, 150, 40, 255 });
+
+        DrawText("TEMPLE RUNNER 3D", 30, 25, 20, (Color){ 240, 170, 50, 255 });
+        DrawText("A / D / Arrows : Move (Desktop)", 30, 50, 13, RAYWHITE);
+        DrawText("Touch / Drag   : Move (Mobile)", 30, 68, 13, RAYWHITE);
+        DrawText("Tilt Device    : Gyro Steering", 30, 86, 13, (Color){ 100, 240, 255, 255 });
+        DrawText("SPACE / Tap Top: Jump", 30, 104, 13, (Color){ 255, 215, 0, 255 });
+
+        float currentDistance = isOnTurnedPath ? (500.0f + (g.player.position.x - 3.0f)) : g.player.position.z;
+        DrawText(TextFormat("Distance: %.1f m", currentDistance), 30, 128, 16, YELLOW);
+        DrawText(TextFormat("Coins: %d", g.score), 30, 150, 16, (Color){ 255, 215, 0, 255 });
+        DrawText(TextFormat("Speed: %.1f m/s", g.isGameOver ? 0.0f : g.forwardSpeed), 30, 172, 16, g.isGameOver ? RED : GREEN);
+        DrawText(TextFormat("Player X: %.3f", g.player.position.x), 30, 194, 16, (Color){ 100, 230, 255, 255 });
+
+        DrawFPS(GetScreenWidth() - 100, 20);
+
+        // Motion Controls Prompt Button (top-right next to FPS)
+#if defined(__EMSCRIPTEN__)
+        Rectangle motionBtn = { (float)GetScreenWidth() - 220, 50, 205, 30 };
+        Vector2 mousePos = GetMousePosition();
+        bool hovered = CheckCollisionPointRec(mousePos, motionBtn);
+        DrawRectangleRec(motionBtn, hovered ? (Color){ 45, 75, 120, 230 } : (Color){ 25, 40, 70, 200 });
+        DrawRectangleLinesEx(motionBtn, 1, (Color){ 100, 200, 255, 255 });
+        DrawText(IsWebMotionActive() ? "Gyro: Active" : "Enable Motion / Gyro", motionBtn.x + 15, motionBtn.y + 8, 13, (Color){ 200, 240, 255, 255 });
+        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            TriggerWebMotionRequest();
+        }
+#endif
+
+        // Game Over Modal Overlay
+        if (g.isGameOver) {
+            int bannerWidth = 480;
+            int bannerHeight = 250;
+            int bannerX = (GetScreenWidth() - bannerWidth) / 2;
+            int bannerY = (GetScreenHeight() - bannerHeight) / 2;
+
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.65f));
+
+            DrawRectangle(bannerX, bannerY, bannerWidth, bannerHeight, (Color){ 25, 28, 42, 245 });
+            DrawRectangleLines(bannerX, bannerY, bannerWidth, bannerHeight, (Color){ 255, 60, 80, 255 });
+            DrawRectangleLines(bannerX + 2, bannerY + 2, bannerWidth - 4, bannerHeight - 4, (Color){ 255, 140, 0, 255 });
+
+            const char* titleText = "GAME OVER";
+            int titleWidth = MeasureText(titleText, 40);
+            DrawText(titleText, bannerX + (bannerWidth - titleWidth) / 2, bannerY + 25, 40, (Color){ 255, 60, 80, 255 });
+
+            const char* scoreText = TextFormat("Distance Survived: %.1f m", currentDistance);
+            int scoreWidth = MeasureText(scoreText, 22);
+            DrawText(scoreText, bannerX + (bannerWidth - scoreWidth) / 2, bannerY + 85, 22, YELLOW);
+
+            const char* coinText = TextFormat("Coins Collected: %d", g.score);
+            int coinWidth = MeasureText(coinText, 22);
+            DrawText(coinText, bannerX + (bannerWidth - coinWidth) / 2, bannerY + 115, 22, (Color){ 255, 215, 0, 255 });
+
+            const char* restartText = "Press [ R ] or Tap to Restart";
+            int restartWidth = MeasureText(restartText, 20);
+            DrawText(restartText, bannerX + (bannerWidth - restartWidth) / 2, bannerY + 175, 20, (Color){ 0, 230, 255, 255 });
+        }
+
+    EndDrawing();
 }
 
 int main() {
@@ -507,329 +875,43 @@ int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(screenWidth, screenHeight, "3D Temple Runner - Mountain Valley Canyon");
 
+    TraceLog(LOG_INFO, "CONTINUOUS_MOVEMENT_BUILD_20260824");
+
+#if defined(__EMSCRIPTEN__)
+    InitWebOrientationBridge();
+#endif
+
     // Load Rigged 3D Humanoid Character System with assets/player/character.glb
-    PlayerCharacter player;
     const char* relativeModelPath = "assets/player/character.glb";
-    if (!InitPlayerCharacter(player, relativeModelPath)) {
+    if (!InitPlayerCharacter(g_game.player, relativeModelPath)) {
         TraceLog(LOG_ERROR, "FATAL ERROR: Could not load 3D rigged humanoid character from %s", relativeModelPath);
     }
+    g_game.player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
 
     // Generate Natural 3D Mountain Valley Canyon System
-    MountainValleySystem valley;
-    InitMountainValleySystem(valley);
+    InitMountainValleySystem(g_game.valley);
 
-    const float forwardSpeed = 14.0f;   // Auto forward running velocity (units/sec)
-
-    // Vertical Jump Physics Constants (Smooth ~0.87s arc, clears 2.0m obstacles)
-    const float jumpVelocity = 10.5f;   // Vertical launch velocity
-    const float gravity      = -24.0f;  // Downward gravity acceleration
-
-    // Road parameters (Temple Run Stone Path)
-    const float roadWidth = 10.0f;
-    const float roadHalfWidth = roadWidth / 2.0f;
-
-    // Discrete 3-Lane System Coordinates (Camera view: +X is visually LEFT, -X is visually RIGHT)
-    const float laneX[3] = { 2.8f, 0.0f, -2.8f }; // 0: Visually Left (+2.8f), 1: Center (0.0f), 2: Visually Right (-2.8f)
-    const float laneSlideSpeed = 16.0f;          // Exponential slide interpolation rate (~0.20s)
-
-    // Obstacle Spawning & Tuning Constants
-    const Vector3 obstacleSize = { 2.2f, 2.0f, 2.0f };
-    const float minObstacleSpacing = 28.0f; // Z distance between obstacles
-    const float spawnAheadDistance = 250.0f; // Distance ahead of player to generate
-    const float initialSpawnZ = 50.0f;      // Start spawning obstacles after a safe runway
-
-    std::vector<Obstacle> obstacles;
-    float nextSpawnZ = initialSpawnZ;
-
-    // Coin Spawning & Tuning Constants
-    const float coinRadius = 0.6f;
-    const float coinHeight = 0.15f;
-    const float coinFloatHeight = 1.0f;
-    const float initialCoinSpawnZ = 30.0f;
-
-    std::vector<Coin> coins;
-    float nextCoinSpawnZ = initialCoinSpawnZ;
-    int score = 0;
-
-    // Game state flags
-    bool isGameOver = false;
-
-    // Reset game helper lambda
-    auto ResetGame = [&]() {
-        player.position = (Vector3){ 0.0f, 0.0f, 0.0f };
-        player.currentLane = 1; // Center lane
-        player.targetX = 0.0f;
-        player.verticalVelocity = 0.0f;
-        player.isGrounded = true;
-        player.animTime = 0.0f;
-        obstacles.clear();
-        coins.clear();
-        nextSpawnZ = initialSpawnZ;
-        nextCoinSpawnZ = initialCoinSpawnZ;
-        score = 0;
-        isGameOver = false;
-    };
-
-    // 3D Third-person camera setup following the 3D runner
-    Camera3D camera = { 0 };
-    camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
-    camera.fovy = 50.0f;
-    camera.projection = CAMERA_PERSPECTIVE;
+    // 3D Third-person camera setup
+    g_game.camera = { 0 };
+    g_game.camera.position = (Vector3){ 0.0f, 4.0f, -8.0f };
+    g_game.camera.target   = (Vector3){ 0.0f, 1.0f, 8.0f };
+    g_game.camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    g_game.camera.fovy = 50.0f;
+    g_game.camera.projection = CAMERA_PERSPECTIVE;
 
     SetTargetFPS(60);
 
-    // ----------------------------------------------------------------------------------
-    // Main Game Loop
-    // ----------------------------------------------------------------------------------
+#if defined(__EMSCRIPTEN__)
+    emscripten_set_main_loop(UpdateDrawFrame, 0, 1);
+#else
     while (!WindowShouldClose()) {
-        float deltaTime = GetFrameTime();
-
-        // Restart input listener (R key restarts ONLY when in Game Over state)
-        if (isGameOver && IsKeyPressed(KEY_R)) {
-            ResetGame();
-        }
-
-        if (!isGameOver) {
-            // --- 1. Forward Speed & Lane Switching Input ---
-            player.position.z += forwardSpeed * deltaTime;
-
-            // Discrete 3-Lane Input Switching (IsKeyPressed prevents holding auto-repeat)
-            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT)) {
-                if (player.currentLane > 0) {
-                    player.currentLane--;
-                    player.targetX = laneX[player.currentLane];
-                }
-            }
-
-            if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) {
-                if (player.currentLane < 2) {
-                    player.currentLane++;
-                    player.targetX = laneX[player.currentLane];
-                }
-            }
-
-            // Smooth Lateral Interpolation toward Target Lane X Position (~0.20s slide)
-            player.position.x = Lerp(player.position.x, player.targetX, laneSlideSpeed * deltaTime);
-            if (fabsf(player.targetX - player.position.x) < 0.005f) {
-                player.position.x = player.targetX;
-            }
-
-            // --- Vertical Jump Physics (SPACE Key) ---
-            if (player.isGrounded && IsKeyPressed(KEY_SPACE)) {
-                player.verticalVelocity = jumpVelocity;
-                player.isGrounded = false;
-            }
-
-            if (!player.isGrounded) {
-                player.verticalVelocity += gravity * deltaTime;
-                player.position.y += player.verticalVelocity * deltaTime;
-
-                if (player.position.y <= 0.0f) {
-                    player.position.y = 0.0f;
-                    player.verticalVelocity = 0.0f;
-                    player.isGrounded = true;
-                }
-            }
-
-            // Update Skeletal Model Running Animation continuously (In-Place loop)
-            UpdatePlayerAnimation(player, true, deltaTime);
-
-            // --- 2. Dynamic Obstacle Spawning ---
-            while (nextSpawnZ < player.position.z + spawnAheadDistance) {
-                int laneIndex = GetRandomValue(0, 2);
-                float posX = laneX[laneIndex];
-                Vector3 obsPos = { posX, obstacleSize.y / 2.0f, nextSpawnZ };
-
-                Obstacle obs;
-                obs.position = obsPos;
-                obs.size = obstacleSize;
-                obs.color = (Color){ 180, 60, 50, 255 };      // Temple Stone Pillar / Wall
-                obs.wireColor = (Color){ 240, 160, 40, 255 }; // Ancient Rune Gold Accent
-
-                obstacles.push_back(obs);
-                nextSpawnZ += minObstacleSpacing + (float)GetRandomValue(0, 12);
-            }
-
-            // --- 3. Dynamic Coin Sequence Spawning ---
-            while (nextCoinSpawnZ < player.position.z + spawnAheadDistance) {
-                int coinLane = GetRandomValue(0, 2);
-                float coinX = laneX[coinLane];
-                int coinSequenceCount = GetRandomValue(3, 5); // Sequence trail of coins
-                float spacing = 4.5f;
-
-                for (int c = 0; c < coinSequenceCount; c++) {
-                    Coin coin;
-                    coin.position = (Vector3){ coinX, coinFloatHeight, nextCoinSpawnZ + c * spacing };
-                    coin.collected = false;
-                    coin.rotation = (float)GetRandomValue(0, 360);
-                    coins.push_back(coin);
-                }
-
-                nextCoinSpawnZ += coinSequenceCount * spacing + (float)GetRandomValue(15, 30);
-            }
-
-            // --- 4. Coin Rotation Animation & Collection Detection ---
-            for (auto& coin : coins) {
-                if (coin.collected) continue;
-
-                coin.rotation += 150.0f * deltaTime;
-                if (coin.rotation >= 360.0f) coin.rotation -= 360.0f;
-
-                Vector3 currentCoinPos = coin.position;
-                currentCoinPos.y += 0.15f * sinf(coin.rotation * (float)DEG2RAD * 2.0f);
-
-                // Sphere-to-sphere collision check with runner body
-                Vector3 playerCenter = { player.position.x, player.position.y + 1.0f, player.position.z };
-                float hitRadius = player.collisionRadius + coinRadius;
-
-                if (Vector3DistanceSqr(playerCenter, currentCoinPos) <= hitRadius * hitRadius) {
-                    coin.collected = true;
-                    score++;
-                }
-            }
-
-            // --- 5. Garbage Collection / Memory Optimization ---
-            for (size_t i = 0; i < obstacles.size(); ) {
-                if (obstacles[i].position.z < player.position.z - 30.0f) {
-                    obstacles.erase(obstacles.begin() + i);
-                } else {
-                    i++;
-                }
-            }
-
-            for (size_t i = 0; i < coins.size(); ) {
-                if (coins[i].collected || coins[i].position.z < player.position.z - 30.0f) {
-                    coins.erase(coins.begin() + i);
-                } else {
-                    i++;
-                }
-            }
-
-            // --- 6. Obstacle Collision Detection ---
-            Vector3 playerCenter = { player.position.x, player.position.y + 1.0f, player.position.z };
-            for (const auto& obs : obstacles) {
-                BoundingBox obsBox = {
-                    (Vector3){ obs.position.x - obs.size.x / 2.0f, obs.position.y - obs.size.y / 2.0f, obs.position.z - obs.size.z / 2.0f },
-                    (Vector3){ obs.position.x + obs.size.x / 2.0f, obs.position.y + obs.size.y / 2.0f, obs.position.z + obs.size.z / 2.0f }
-                };
-
-                if (CheckCollisionSphereBox(playerCenter, player.collisionRadius, obsBox)) {
-                    isGameOver = true;
-                    player.verticalVelocity = 0.0f;
-                    break;
-                }
-            }
-        }
-
-        // --- Third-Person Camera Tracking ---
-        camera.position = (Vector3){
-            player.position.x,
-            player.position.y + 4.0f,
-            player.position.z - 8.0f
-        };
-
-        camera.target = (Vector3){
-            player.position.x,
-            player.position.y + 1.0f,
-            player.position.z + 8.0f
-        };
-
-        // ------------------------------------------------------------------------------
-        // Draw / Render
-        // ------------------------------------------------------------------------------
-        BeginDrawing();
-            // Atmosphere: Bright Warm Desert/Sandstone Canyon Sky Color
-            ClearBackground((Color){ 135, 190, 225, 255 });
-
-            BeginMode3D(camera);
-
-                // --- Draw Natural 3D Mountain Valley Canyon Environment & Sandstone Road ---
-                DrawMountainValleyEnvironment(valley, player.position.z, roadWidth);
-
-                // --- Draw Spawning Gameplay Obstacles ---
-                for (const auto& obs : obstacles) {
-                    DrawCube(obs.position, obs.size.x, obs.size.y, obs.size.z, obs.color);
-                    DrawCubeWires(obs.position, obs.size.x + 0.02f, obs.size.y + 0.02f, obs.size.z + 0.02f, obs.wireColor);
-                }
-
-                // --- Draw Rotating 3D Gold Coins ---
-                for (const auto& coin : coins) {
-                    if (coin.collected) continue;
-
-                    float bobOffset = 0.15f * sinf(coin.rotation * (float)DEG2RAD * 2.0f);
-                    Vector3 drawPos = { coin.position.x, coin.position.y + bobOffset, coin.position.z };
-
-                    rlPushMatrix();
-                        rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
-                        rlRotatef(coin.rotation, 0.0f, 1.0f, 0.0f);
-                        rlRotatef(90.0f, 1.0f, 0.0f, 0.0f);
-
-                        DrawCylinder((Vector3){ 0, -coinHeight / 2.0f, 0 }, coinRadius, coinRadius, coinHeight, 16, (Color){ 255, 215, 0, 255 });
-                        DrawCylinderWires((Vector3){ 0, -coinHeight / 2.0f, 0 }, coinRadius + 0.01f, coinRadius + 0.01f, coinHeight + 0.01f, 16, (Color){ 220, 140, 0, 255 });
-                        DrawCircle3D((Vector3){ 0, coinHeight / 2.0f + 0.005f, 0 }, coinRadius * 0.55f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 245, 140, 255 });
-                        DrawCircle3D((Vector3){ 0, -coinHeight / 2.0f - 0.005f, 0 }, coinRadius * 0.55f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 245, 140, 255 });
-                    rlPopMatrix();
-
-                    DrawCircle3D((Vector3){ drawPos.x, 0.02f, drawPos.z }, coinRadius * 0.85f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 215, 0, 70 });
-                }
-
-                // --- Draw Rigged 3D Humanoid Character (character.glb) ---
-                DrawPlayerCharacter(player);
-
-            EndMode3D();
-
-            // --- HUD Overlay ---
-            DrawRectangle(15, 15, 340, 202, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
-            DrawRectangleLines(15, 15, 340, 202, (Color){ 210, 150, 40, 255 });
-
-            DrawText("TEMPLE RUNNER 3D", 30, 25, 20, (Color){ 240, 170, 50, 255 });
-            DrawText("A / Left Arrow  : Switch Lane Left", 30, 52, 13, RAYWHITE);
-            DrawText("D / Right Arrow : Switch Lane Right", 30, 70, 13, RAYWHITE);
-            DrawText("SPACE Key       : Jump", 30, 88, 13, (Color){ 100, 240, 255, 255 });
-            DrawText("R Key           : Restart (Game Over)", 30, 106, 13, (Color){ 200, 200, 220, 255 });
-
-            DrawText(TextFormat("Distance: %.1f m", player.position.z), 30, 128, 16, YELLOW);
-            DrawText(TextFormat("Coins: %d", score), 30, 150, 16, (Color){ 255, 215, 0, 255 });
-            DrawText(TextFormat("Speed: %.1f m/s", isGameOver ? 0.0f : forwardSpeed), 30, 172, 16, isGameOver ? RED : GREEN);
-
-            DrawFPS(GetScreenWidth() - 100, 20);
-
-            // --- Game Over Modal Overlay ---
-            if (isGameOver) {
-                int bannerWidth = 480;
-                int bannerHeight = 250;
-                int bannerX = (GetScreenWidth() - bannerWidth) / 2;
-                int bannerY = (GetScreenHeight() - bannerHeight) / 2;
-
-                DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.65f));
-
-                DrawRectangle(bannerX, bannerY, bannerWidth, bannerHeight, (Color){ 25, 28, 42, 245 });
-                DrawRectangleLines(bannerX, bannerY, bannerWidth, bannerHeight, (Color){ 255, 60, 80, 255 });
-                DrawRectangleLines(bannerX + 2, bannerY + 2, bannerWidth - 4, bannerHeight - 4, (Color){ 255, 140, 0, 255 });
-
-                const char* titleText = "GAME OVER";
-                int titleWidth = MeasureText(titleText, 40);
-                DrawText(titleText, bannerX + (bannerWidth - titleWidth) / 2, bannerY + 25, 40, (Color){ 255, 60, 80, 255 });
-
-                const char* scoreText = TextFormat("Distance Survived: %.1f m", player.position.z);
-                int scoreWidth = MeasureText(scoreText, 22);
-                DrawText(scoreText, bannerX + (bannerWidth - scoreWidth) / 2, bannerY + 85, 22, YELLOW);
-
-                const char* coinText = TextFormat("Coins Collected: %d", score);
-                int coinWidth = MeasureText(coinText, 22);
-                DrawText(coinText, bannerX + (bannerWidth - coinWidth) / 2, bannerY + 115, 22, (Color){ 255, 215, 0, 255 });
-
-                const char* restartText = "Press [ R ] to Restart";
-                int restartWidth = MeasureText(restartText, 20);
-                DrawText(restartText, bannerX + (bannerWidth - restartWidth) / 2, bannerY + 175, 20, (Color){ 0, 230, 255, 255 });
-            }
-
-        EndDrawing();
+        UpdateDrawFrame();
     }
+#endif
 
     // Unload 3D Models and Resources
-    UnloadMountainValleySystem(valley);
-    UnloadPlayerCharacter(player);
+    UnloadMountainValleySystem(g_game.valley);
+    UnloadPlayerCharacter(g_game.player);
     CloseWindow();
 
     return 0;
