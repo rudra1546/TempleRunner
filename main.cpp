@@ -615,7 +615,14 @@ void DrawQuad3D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, Color color) {
     rlEnd();
 }
 
-// Helper function to check if player position is on solid road ground for 90-Degree T-Junction Dual Route Map
+// Helper: Get solid road surface Y coordinate for any player position
+inline float GetRoadSurfaceY(Vector3 pos) {
+    if (pos.x <= -1050.0f && pos.z >= 1145.0f) {
+        return -300.0f; // Post-zipline destination road at 700m altitude
+    }
+    return 0.0f; // Main road, Left route, Right route, and Segment 3 at 1000m base altitude
+}
+
 // Helper function to check if player position is on solid road ground for Multi-Turn Route Map
 inline bool IsOnRoadSurface(Vector3 pos) {
     // 1. Straight Main Road (Z in [-10, 503], X centered at 0 within 3.5m)
@@ -623,74 +630,104 @@ inline bool IsOnRoadSurface(Vector3 pos) {
         return true;
     }
     // 2. Horizontal Left (+X up to 353.5m) and Right (-X down to -350m) Routes (Z around 500m)
-    if (pos.z >= 496.5f && pos.z <= 503.5f && pos.x >= -350.0f && pos.x <= 353.5f) {
+    if (pos.z >= 496.5f && pos.z <= 503.5f && pos.x >= -350.5f && pos.x <= 353.5f) {
         return true;
     }
     // 3. Extended Continued Route after 90° Right Turn (X centered at 350m within 3.5m, Z from 497m to 855m)
     if (pos.z >= 496.5f && pos.z <= 855.0f && pos.x >= 346.5f && pos.x <= 353.5f) {
         return true;
     }
-    // 4. Post-Zipline Destination Road (X centered at -700m within 3.5m, Z from 795m to 1205m)
-    if (pos.z >= 795.0f && pos.z <= 1205.0f && pos.x >= -703.5f && pos.x <= -696.5f) {
+    // 4. Post-Zipline Destination Road (X centered at -1100m within 3.5m, Z from 1145m to 1655m)
+    if (pos.z >= 1145.0f && pos.z <= 1655.0f && pos.x >= -1103.5f && pos.x <= -1096.5f) {
         return true;
     }
     return false;
 }
 
 // ------------------------------------------------------------------------------
-// Curved 3D Zipline Route Geometry (~500m smooth sweeping catenary curve)
-// Starts at Right Road End (-350m, 6m, 500m) -> Finishes at Destination Road (-700m, 0m, 800m)
+// Straight 3D Diagonal Zipline Route Geometry (~1038m straight diagonal line)
+// Starts at Right Road Endpoint (-350m, 6.0m, 500m) -> Finishes at Destination Road (-1100m, -297.65m, 1150m)
+// Constant downward slope of ~17.0° from 1000m start altitude to 700m destination altitude (drop = 300m)
 // ------------------------------------------------------------------------------
 inline Vector3 GetZiplinePoint(float s) {
     s = Clamp(s, 0.0f, 1.0f);
-    // Smooth S-curve across canyon in X and Z
-    float x = -350.0f - 350.0f * s - 40.0f * sinf(s * PI);
-    float z = 500.0f + 300.0f * s + 50.0f * sinf(s * PI);
-
-    // Gradual smooth descent with natural catenary cable sag
-    float baseHeight = 6.0f * (1.0f - s);
-    float sag = -1.0f * sinf(s * PI);
-    float y = baseHeight + sag;
-    if (y < 0.0f) y = 0.0f;
-
+    // Pure straight 3D line segment with constant linear slope (no curves or smoothersteps)
+    float x = -350.0f - 750.0f * s;
+    float y = 6.0f - 303.65f * s;
+    float z = 500.0f + 650.0f * s;
     return (Vector3){ x, y, z };
 }
 
 inline Vector3 GetZiplineTangent(float s) {
-    float delta = 0.01f;
-    Vector3 p1 = GetZiplinePoint(fmaxf(0.0f, s - delta));
-    Vector3 p2 = GetZiplinePoint(fminf(1.0f, s + delta));
-    return Vector3Normalize(Vector3Subtract(p2, p1));
+    // Constant normalized 3D diagonal direction vector
+    const Vector3 dir = { -750.0f, -303.65f, 650.0f };
+    return Vector3Normalize(dir);
 }
 
 // Render 3D Curved Zipline Cable, Support Towers, and Arrival Gantry
 void DrawZiplineRoute() {
-    // 1. Start Launch Tower at right road endpoint (X = -350, Z = 500)
-    DrawCube((Vector3){ -350.0f, 3.75f, 497.0f }, 0.8f, 8.5f, 0.8f, (Color){ 85, 65, 45, 255 });
-    DrawCube((Vector3){ -350.0f, 3.75f, 503.0f }, 0.8f, 8.5f, 0.8f, (Color){ 85, 65, 45, 255 });
-    DrawCube((Vector3){ -350.0f, 7.5f, 500.0f }, 1.0f, 0.8f, 6.8f, (Color){ 135, 100, 65, 255 });
-    DrawCubeWires((Vector3){ -350.0f, 7.5f, 500.0f }, 1.0f, 0.8f, 6.8f, (Color){ 60, 40, 25, 255 });
+    // 1. Start Launch Tower at flat right road endpoint (X = -350, Z = 500, Y = 0.0m)
+    Vector3 startCablePos = GetZiplinePoint(0.0f); // (-350.0, 6.0, 500.0)
 
-    // Glowing target sphere at cable start
-    DrawSphere((Vector3){ -350.0f, 6.0f, 500.0f }, 0.45f, (Color){ 255, 215, 80, 240 });
+    // Twin Heavy Launch Support Posts on road curbs
+    DrawCube((Vector3){ -350.0f, 3.75f, 496.5f }, 0.9f, 7.5f, 0.9f, (Color){ 75, 55, 38, 255 });
+    DrawCubeWires((Vector3){ -350.0f, 3.75f, 496.5f }, 0.9f, 7.5f, 0.9f, (Color){ 195, 145, 50, 255 });
+    DrawCube((Vector3){ -350.0f, 3.75f, 503.5f }, 0.9f, 7.5f, 0.9f, (Color){ 75, 55, 38, 255 });
+    DrawCubeWires((Vector3){ -350.0f, 3.75f, 503.5f }, 0.9f, 7.5f, 0.9f, (Color){ 195, 145, 50, 255 });
 
-    // 2. End Arrival Gantry at destination road (X = -700, Z = 800)
-    DrawCube((Vector3){ -700.0f, 2.5f, 797.5f }, 0.8f, 6.0f, 0.8f, (Color){ 85, 65, 45, 255 });
-    DrawCube((Vector3){ -700.0f, 2.5f, 802.5f }, 0.8f, 6.0f, 0.8f, (Color){ 85, 65, 45, 255 });
-    DrawCube((Vector3){ -700.0f, 5.0f, 800.0f }, 1.0f, 0.8f, 5.8f, (Color){ 135, 100, 65, 255 });
-    DrawCubeWires((Vector3){ -700.0f, 5.0f, 800.0f }, 1.0f, 0.8f, 5.8f, (Color){ 60, 40, 25, 255 });
+    // Top Overhead Header Crossbeam
+    DrawCube((Vector3){ -350.0f, 7.5f, 500.0f }, 1.1f, 0.8f, 8.0f, (Color){ 120, 90, 55, 255 });
+    DrawCubeWires((Vector3){ -350.0f, 7.5f, 500.0f }, 1.1f, 0.8f, 8.0f, (Color){ 195, 145, 50, 255 });
 
-    // 3. Smooth Curved 3D Steel Cable Segments (~500m long)
-    const int numCableSegs = 75;
+    // Cable Start Anchor Housing
+    DrawCube(startCablePos, 0.7f, 0.6f, 0.7f, (Color){ 45, 40, 35, 255 });
+    DrawCubeWires(startCablePos, 0.7f, 0.6f, 0.7f, (Color){ 240, 190, 50, 255 });
+    DrawLine3D((Vector3){ -350.0f, 7.5f, 500.0f }, startCablePos, (Color){ 200, 175, 100, 255 });
+
+    // Glowing Golden Beacon Ring at Launch Anchor
+    DrawSphere(startCablePos, 0.45f, (Color){ 255, 220, 70, 240 });
+
+    // 2. End Arrival Support Gate at Destination Road (X = -1100, Z = 1150, Y = -300.0m)
+    Vector3 endCablePos = GetZiplinePoint(1.0f); // (-1100.0, -297.65, 1150.0)
+    const float DEST_ROAD_Y = -300.0f;
+
+    // Gate Pillars on left & right road curbs (Road is centered at X=-1100, curbs at X=-1103.5 and X=-1096.5)
+    DrawCube((Vector3){ -1103.5f, DEST_ROAD_Y + 2.75f, 1150.0f }, 0.9f, 5.5f, 0.9f, (Color){ 75, 55, 38, 255 });
+    DrawCubeWires((Vector3){ -1103.5f, DEST_ROAD_Y + 2.75f, 1150.0f }, 0.9f, 5.5f, 0.9f, (Color){ 195, 145, 50, 255 });
+    DrawCube((Vector3){ -1096.5f, DEST_ROAD_Y + 2.75f, 1150.0f }, 0.9f, 5.5f, 0.9f, (Color){ 75, 55, 38, 255 });
+    DrawCubeWires((Vector3){ -1096.5f, DEST_ROAD_Y + 2.75f, 1150.0f }, 0.9f, 5.5f, 0.9f, (Color){ 195, 145, 50, 255 });
+
+    // Top Overhead Crossbeam spanning across the road
+    DrawCube((Vector3){ -1100.0f, DEST_ROAD_Y + 5.2f, 1150.0f }, 7.9f, 0.7f, 0.9f, (Color){ 120, 90, 55, 255 });
+    DrawCubeWires((Vector3){ -1100.0f, DEST_ROAD_Y + 5.2f, 1150.0f }, 7.9f, 0.7f, 0.9f, (Color){ 195, 145, 50, 255 });
+
+    // Cable Catch Buffer / Spring Stopper Box
+    DrawCube(endCablePos, 0.75f, 0.6f, 0.75f, (Color){ 50, 45, 40, 255 });
+    DrawCubeWires(endCablePos, 0.75f, 0.6f, 0.75f, (Color){ 240, 180, 50, 255 });
+    DrawLine3D((Vector3){ -1100.0f, DEST_ROAD_Y + 5.2f, 1150.0f }, endCablePos, (Color){ 200, 175, 100, 255 });
+
+    // 3. High-Contrast 3D Steel Cable (~1037m long, 150 segments)
+    const int numCableSegs = 150;
     for (int i = 0; i < numCableSegs; i++) {
         float s1 = (float)i / (float)numCableSegs;
         float s2 = (float)(i + 1) / (float)numCableSegs;
         Vector3 p1 = GetZiplinePoint(s1);
         Vector3 p2 = GetZiplinePoint(s2);
 
-        // Main steel cable
-        DrawLine3D(p1, p2, (Color){ 210, 190, 140, 255 });
-        DrawLine3D((Vector3){ p1.x, p1.y + 0.035f, p1.z }, (Vector3){ p2.x, p2.y + 0.035f, p2.z }, (Color){ 255, 235, 180, 255 });
+        // Dark high-contrast steel braided cable with multi-line thickness
+        DrawLine3D(p1, p2, (Color){ 25, 28, 35, 255 });
+        DrawLine3D((Vector3){ p1.x, p1.y + 0.04f, p1.z }, (Vector3){ p2.x, p2.y + 0.04f, p2.z }, (Color){ 35, 40, 50, 255 });
+        DrawLine3D((Vector3){ p1.x, p1.y - 0.04f, p1.z }, (Vector3){ p2.x, p2.y - 0.04f, p2.z }, (Color){ 35, 40, 50, 255 });
+        DrawLine3D((Vector3){ p1.x + 0.04f, p1.y, p1.z }, (Vector3){ p2.x + 0.04f, p2.y, p2.z }, (Color){ 30, 35, 45, 255 });
+        DrawLine3D((Vector3){ p1.x - 0.04f, p1.y, p1.z }, (Vector3){ p2.x - 0.04f, p2.y, p2.z }, (Color){ 30, 35, 45, 255 });
+
+        // Metallic highlight strand on top of the cable
+        DrawLine3D((Vector3){ p1.x, p1.y + 0.02f, p1.z }, (Vector3){ p2.x, p2.y + 0.02f, p2.z }, (Color){ 205, 175, 110, 255 });
+
+        // Cable vibration dampener rings every 15 segments
+        if (i % 15 == 0 && i > 0 && i < numCableSegs) {
+            DrawSphere(p1, 0.18f, (Color){ 220, 165, 50, 255 });
+        }
     }
 }
 
@@ -818,7 +855,7 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
         DrawCurb((Vector3){ 353.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
     }
 
-    // --- 4. Mirrored Turned Right Horizontal Road (-X: -3.0m to -350.0m, centered at Z = 500.0m) ---
+    // --- 4. Mirrored Turned Right Horizontal Road (-X: -3.0m to -350.0m, centered at Z = 500.0m, completely flat at Y=0) ---
     for (float x = -3.0f; x >= -350.0f; x -= tileLength) {
         float nextX = fmaxf(x - tileLength, -350.0f);
         float len = fabsf(nextX - x);
@@ -830,16 +867,17 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
         DrawCurb((Vector3){ centerX, 0.35f, 496.55f }, (Vector3){ len, 0.7f, 0.9f });
     }
 
-    // --- 5. Post-Zipline Destination Road (+Z: 800.0m to 1200.0m, centered at X = -700.0m) ---
-    for (float z = 800.0f; z < 1200.0f; z += tileLength) {
-        float nextZ = fminf(z + tileLength, 1200.0f);
+    // --- 5. Post-Zipline Destination Road (+Z: 1150.0m to 1650.0m, centered at X = -1100.0m at Altitude = 700.0m) ---
+    const float DEST_ROAD_Y = -300.0f;
+    for (float z = 1150.0f; z < 1650.0f; z += tileLength) {
+        float nextZ = fminf(z + tileLength, 1650.0f);
         float len = nextZ - z;
         float centerZ = z + len / 2.0f;
         int tileIdx = (int)(z / tileLength);
 
-        DrawTileSurface((Vector3){ -700.0f, -0.5f, centerZ }, narrowPathWidth, len, tileIdx);
-        DrawCurb((Vector3){ -703.45f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
-        DrawCurb((Vector3){ -696.55f, 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
+        DrawTileSurface((Vector3){ -1100.0f, DEST_ROAD_Y - 0.5f, centerZ }, narrowPathWidth, len, tileIdx);
+        DrawCurb((Vector3){ -1103.45f, DEST_ROAD_Y + 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
+        DrawCurb((Vector3){ -1096.55f, DEST_ROAD_Y + 0.35f, centerZ }, (Vector3){ 0.9f, 0.7f, len });
     }
 
     // --- 6. Tile Seams ---
@@ -866,10 +904,10 @@ void DrawMountainValleyEnvironment(const MountainValleySystem& valley, float pla
         Color seamColor = (fmodf(fabsf(x), 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
         DrawLine3D((Vector3){ x, 0.015f, 497.0f }, (Vector3){ x, 0.015f, 503.0f }, seamColor);
     }
-    // Post-zipline destination road seams (+Z at X=-700)
-    for (float z = 804.0f; z <= 1200.0f; z += 6.0f) {
+    // Post-zipline destination road seams (+Z at X=-1100)
+    for (float z = 1154.0f; z <= 1650.0f; z += 6.0f) {
         Color seamColor = (fmodf(z, 24.0f) == 0.0f) ? (Color){ 220, 165, 60, 230 } : (Color){ 60, 50, 40, 180 };
-        DrawLine3D((Vector3){ -703.0f, 0.015f, z }, (Vector3){ -697.0f, 0.015f, z }, seamColor);
+        DrawLine3D((Vector3){ -1103.0f, DEST_ROAD_Y + 0.015f, z }, (Vector3){ -1097.0f, DEST_ROAD_Y + 0.015f, z }, seamColor);
     }
 }
 
@@ -885,11 +923,11 @@ struct GameState {
     static constexpr float MAX_FORWARD_SPEED = 28.0f;         // Capped maximum running speed (m/s)
 
     // Zipline Route Tuning Constants
-    static constexpr float ZIPLINE_LENGTH = 500.0f;          // Approximate cable curved length (m)
-    static constexpr float ZIPLINE_SPEED = 24.0f;           // Gliding travel speed along cable (m/s)
+    static constexpr float ZIPLINE_LENGTH = 1037.0f;         // Total 3D diagonal cable length (m)
+    static constexpr float ZIPLINE_SPEED = 35.0f;           // Canyon gliding travel speed (m/s)
     static constexpr float ZIPLINE_GRAB_RADIUS = 4.0f;      // Airborne grab radius around cable start
     static constexpr float ZIPLINE_HEIGHT_START = 6.0f;     // Starting cable elevation (m)
-    static constexpr float ZIPLINE_HEIGHT_END = 0.0f;       // Ending destination elevation (m)
+    static constexpr float ZIPLINE_HEIGHT_END = -297.65f;   // Ending destination cable elevation (m)
 
     float forwardSpeed = BASE_FORWARD_SPEED;
     float jumpVelocity = 10.5f;
@@ -1003,10 +1041,10 @@ void UpdateDrawFrame() {
         g.ziplineProgress += progressDelta;
 
         if (g.ziplineProgress >= 1.0f) {
-            // Reached Destination Road at X = -700m, Z = 800m!
+            // Reached Destination Road at X = -1100m, Z = 1150m, Y = -300.0m (Altitude = 700.0m)!
             g.ziplineProgress = 1.0f;
             g.isZiplining = false;
-            g.player.position = (Vector3){ -700.0f, 0.0f, 800.0f };
+            g.player.position = (Vector3){ -1100.0f, -300.0f, 1150.0f };
             g.player.rotationY = 0.0f; // Facing +Z on Destination Road
             g.player.verticalVelocity = 0.0f;
             g.player.isGrounded = true;
@@ -1031,7 +1069,7 @@ void UpdateDrawFrame() {
         // ----------------------------------------------------------------------
         g.forwardSpeed = fminf(g.forwardSpeed + GameState::FORWARD_ACCELERATION * deltaTime, GameState::MAX_FORWARD_SPEED);
 
-        bool isOnDestinationRoad = (g.player.position.x <= -650.0f && g.player.position.z >= 795.0f);
+        bool isOnDestinationRoad = (g.player.position.x <= -1050.0f && g.player.position.z >= 1145.0f);
         bool isOnSegment3 = (!isOnDestinationRoad && g.player.position.x >= 347.0f && g.player.position.z >= 503.0f);
         bool isOnTurnedLeftPath  = (!isOnDestinationRoad && !isOnSegment3 && g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
         bool isOnTurnedRightPath = (!isOnDestinationRoad && g.player.position.x <= -3.0f && g.player.position.z >= 495.0f);
@@ -1071,7 +1109,7 @@ void UpdateDrawFrame() {
                 g.player.position.x = Clamp(g.player.position.x, 347.0f, 353.0f);
             }
         } else if (isOnDestinationRoad) {
-            // Running forward along +Z on Post-Zipline Destination Road (-700m, 800m -> 1200m)
+            // Running forward along +Z on Post-Zipline Destination Road (-1100m, 1150m -> 1650m)
             g.player.position.z += g.forwardSpeed * deltaTime;
 
             // On Destination Road (+Z): Steer Left is +X, Steer Right is -X
@@ -1079,7 +1117,7 @@ void UpdateDrawFrame() {
 
             // Constrain player strictly within destination road width ONLY WHILE GROUNDED
             if (g.player.isGrounded) {
-                g.player.position.x = Clamp(g.player.position.x, -703.0f, -697.0f);
+                g.player.position.x = Clamp(g.player.position.x, -1103.0f, -1097.0f);
             }
         } else {
             // Running forward along -X on Right Turned Horizontal Road (-3m -> -350m)
@@ -1134,9 +1172,13 @@ void UpdateDrawFrame() {
         float rotLerpSpeed = Clamp(14.0f * deltaTime, 0.0f, 1.0f);
         float angleDiff = fmodf(targetRotationY - g.player.rotationY + 180.0f, 360.0f) - 180.0f;
         g.player.rotationY += angleDiff * rotLerpSpeed;
+        float groundY = GetRoadSurfaceY(g.player.position);
+        if (g.player.isGrounded) {
+            g.player.position.y = groundY;
+        }
 
         // Check if grounded player has run off the road surface
-        if (g.player.position.y == 0.0f && !IsOnRoadSurface(g.player.position)) {
+        if (g.player.position.y == groundY && !IsOnRoadSurface(g.player.position)) {
             g.player.isGrounded = false;
         }
 
@@ -1150,14 +1192,14 @@ void UpdateDrawFrame() {
             g.player.verticalVelocity += g.gravity * deltaTime;
             g.player.position.y += g.player.verticalVelocity * deltaTime;
 
-            // When descending back down to ground level (y <= 0)
-            if (g.player.position.y <= 0.0f) {
+            // When descending back down to ground/road level
+            if (g.player.position.y <= groundY) {
                 if (IsOnRoadSurface(g.player.position)) {
-                    g.player.position.y = 0.0f;
+                    g.player.position.y = groundY;
                     g.player.verticalVelocity = 0.0f;
                     g.player.isGrounded = true;
                 } else {
-                    if (g.player.position.y < -15.0f) {
+                    if (g.player.position.y < groundY - 15.0f) {
                         g.isGameOver = true;
                     }
                 }
@@ -1167,7 +1209,7 @@ void UpdateDrawFrame() {
         // Calculate current total distance traveled along all routes
         float currentDistance = 0.0f;
         if (isOnDestinationRoad) {
-            currentDistance = 500.0f + 350.0f + GameState::ZIPLINE_LENGTH + (g.player.position.z - 800.0f);
+            currentDistance = 500.0f + 350.0f + GameState::ZIPLINE_LENGTH + (g.player.position.z - 1150.0f);
         } else if (isOnSegment3) {
             currentDistance = 500.0f + 347.0f + (g.player.position.z - 503.0f);
         } else if (isOnTurnedLeftPath) {
@@ -1178,11 +1220,10 @@ void UpdateDrawFrame() {
             currentDistance = g.player.position.z;
         }
 
-        // Dynamic Coin Sequence Spawning
-        const float spawnAheadDistance = 250.0f;
-        while (g.nextCoinSpawnZ < currentDistance + spawnAheadDistance) {
-            float coinDist = g.nextCoinSpawnZ;
+        // Procedural Infinite Coin Spawning
+        if (currentDistance + 120.0f >= g.nextCoinSpawnZ) {
             int coinSequenceCount = GetRandomValue(3, 5);
+            float coinDist = g.nextCoinSpawnZ;
             float spacing = 4.5f;
 
             if (coinDist <= 490.0f) {
@@ -1205,11 +1246,14 @@ void UpdateDrawFrame() {
                         g.coins.push_back(leftCoin);
                     }
 
-                    Coin rightCoin;
-                    rightCoin.position = (Vector3){ -(startX + c * spacing), g.coinFloatHeight, 500.0f };
-                    rightCoin.collected = false;
-                    rightCoin.rotation = (float)GetRandomValue(0, 360);
-                    g.coins.push_back(rightCoin);
+                    float rightCoinX = -(startX + c * spacing);
+                    if (rightCoinX >= -348.0f) {
+                        Coin rightCoin;
+                        rightCoin.position = (Vector3){ rightCoinX, g.coinFloatHeight, 500.0f };
+                        rightCoin.collected = false;
+                        rightCoin.rotation = (float)GetRandomValue(0, 360);
+                        g.coins.push_back(rightCoin);
+                    }
                 }
             } else if (coinDist <= 1350.0f) {
                 float offset = coinDist - 840.0f;
@@ -1222,11 +1266,11 @@ void UpdateDrawFrame() {
                     g.coins.push_back(extCoin);
                 }
             } else {
-                float offset = coinDist - 1350.0f;
-                float startZ = 805.0f + offset;
+                float offset = coinDist - 1887.0f;
+                float startZ = 1155.0f + offset;
                 for (int c = 0; c < coinSequenceCount; c++) {
                     Coin destCoin;
-                    destCoin.position = (Vector3){ -700.0f, g.coinFloatHeight, startZ + c * spacing };
+                    destCoin.position = (Vector3){ -1100.0f, -300.0f + g.coinFloatHeight, startZ + c * spacing };
                     destCoin.collected = false;
                     destCoin.rotation = (float)GetRandomValue(0, 360);
                     g.coins.push_back(destCoin);
@@ -1291,31 +1335,31 @@ void UpdateDrawFrame() {
     bool isOnSegment3 = (!isOnDestinationRoad && g.player.position.x >= 347.0f && g.player.position.z >= 503.0f);
     bool isOnTurnedLeftPath  = (!isOnDestinationRoad && !isOnSegment3 && g.player.position.x >= 3.0f && g.player.position.z >= 495.0f);
     bool isOnTurnedRightPath = (!isOnDestinationRoad && g.player.position.x <= -3.0f && g.player.position.z >= 495.0f);
+    bool isOnMainStraight = (!isOnDestinationRoad && !isOnSegment3 && !isOnTurnedLeftPath && !isOnTurnedRightPath);
 
     if (g.isZiplining) {
+        // High-angle sweeping camera during zipline glide
         Vector3 tangent = GetZiplineTangent(g.ziplineProgress);
-        desiredCamPos = Vector3Add(g.player.position, (Vector3){ -tangent.x * 8.5f, 4.0f, -tangent.z * 8.5f });
-        desiredCamTarget = Vector3Add(g.player.position, (Vector3){ tangent.x * 6.0f, 1.8f, tangent.z * 6.0f });
-    } else if (isOnDestinationRoad) {
-        desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
-        desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
-    } else if (isOnSegment3) {
+        desiredCamPos = Vector3Add(g.player.position, (Vector3){ -tangent.x * 9.0f, 4.5f, -tangent.z * 9.0f });
+        desiredCamTarget = Vector3Add(g.player.position, (Vector3){ tangent.x * 6.5f, 1.2f, tangent.z * 6.5f });
+    } else if (isOnMainStraight) {
         desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
         desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
     } else if (isOnTurnedLeftPath) {
         desiredCamPos = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 4.0f, g.player.position.z };
         desiredCamTarget = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 1.0f, g.player.position.z };
-    } else if (isOnTurnedRightPath) {
-        desiredCamPos = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 4.0f, g.player.position.z };
-        desiredCamTarget = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 1.0f, g.player.position.z };
-    } else {
+    } else if (isOnSegment3 || isOnDestinationRoad) {
         desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
         desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
+    } else {
+        // Right route camera
+        desiredCamPos = (Vector3){ g.player.position.x + 8.0f, g.player.position.y + 4.0f, g.player.position.z };
+        desiredCamTarget = (Vector3){ g.player.position.x - 8.0f, g.player.position.y + 1.0f, g.player.position.z };
     }
 
-    float camLerpSpeed = Clamp(6.0f * deltaTime, 0.0f, 1.0f);
-    g.camera.position = Vector3Lerp(g.camera.position, desiredCamPos, camLerpSpeed);
-    g.camera.target   = Vector3Lerp(g.camera.target, desiredCamTarget, camLerpSpeed);
+    float camLerp = Clamp(7.5f * deltaTime, 0.0f, 1.0f);
+    g.camera.position = Vector3Lerp(g.camera.position, desiredCamPos, camLerp);
+    g.camera.target   = Vector3Lerp(g.camera.target, desiredCamTarget, camLerp);
 
     // ------------------------------------------------------------------------------
     // Draw / Render
@@ -1360,7 +1404,8 @@ void UpdateDrawFrame() {
                     DrawCircle3D((Vector3){ 0, -g.coinHeight / 2.0f - 0.005f, 0 }, g.coinRadius * 0.55f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 245, 140, 255 });
                 rlPopMatrix();
 
-                DrawCircle3D((Vector3){ drawPos.x, 0.02f, drawPos.z }, g.coinRadius * 0.85f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 215, 0, 70 });
+                float coinGroundY = GetRoadSurfaceY(coin.position);
+                DrawCircle3D((Vector3){ drawPos.x, coinGroundY + 0.02f, drawPos.z }, g.coinRadius * 0.85f, (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Color){ 255, 215, 0, 70 });
             }
 
             DrawPlayerCharacter(g.player);
@@ -1380,7 +1425,7 @@ void UpdateDrawFrame() {
         if (g.isZiplining) {
             currentDistance = 500.0f + 350.0f + (g.ziplineProgress * GameState::ZIPLINE_LENGTH);
         } else if (isOnDestinationRoad) {
-            currentDistance = 500.0f + 350.0f + GameState::ZIPLINE_LENGTH + (g.player.position.z - 800.0f);
+            currentDistance = 500.0f + 350.0f + GameState::ZIPLINE_LENGTH + (g.player.position.z - 1150.0f);
         } else if (isOnSegment3) {
             currentDistance = 500.0f + 347.0f + (g.player.position.z - 503.0f);
         } else if (isOnTurnedLeftPath) {
@@ -1396,7 +1441,22 @@ void UpdateDrawFrame() {
         DrawText(TextFormat("Speed: %s", modeStr), 30, 172, 16, g.isGameOver ? RED : (g.isZiplining ? (Color){ 100, 240, 255, 255 } : GREEN));
         DrawText(TextFormat("Player X: %.3f", g.player.position.x), 30, 194, 16, (Color){ 100, 230, 255, 255 });
 
-        DrawFPS(GetScreenWidth() - 100, 20);
+        // ----------------------------------------------------------------------
+        // Top-Right Live Elevation HUD Indicator Card
+        // ----------------------------------------------------------------------
+        int elevW = 165;
+        int elevH = 62;
+        int elevX = GetScreenWidth() - elevW - 15;
+        int elevY = 15;
+        DrawRectangle(elevX, elevY, elevW, elevH, Fade((Color){ 12, 16, 28, 255 }, 0.90f));
+        DrawRectangleLines(elevX, elevY, elevW, elevH, (Color){ 70, 170, 255, 220 });
+
+        DrawText("ELEVATION", elevX + 14, elevY + 9, 12, (Color){ 130, 210, 255, 255 });
+        const float BASE_ALTITUDE = 1000.0f;
+        float worldAltitude = fmaxf(0.0f, BASE_ALTITUDE + g.player.position.y);
+        DrawText(TextFormat("%.1f m", worldAltitude), elevX + 14, elevY + 26, 24, (Color){ 255, 255, 255, 255 });
+
+        DrawFPS(GetScreenWidth() - 100, elevY + elevH + 8);
 
 #if defined(__EMSCRIPTEN__)
         // Motion / Gyro Diagnostic Overlay Panel (top-left below main HUD)
