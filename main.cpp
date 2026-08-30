@@ -26,6 +26,13 @@ struct PlayerCharacter {
     float verticalVelocity;
     bool isGrounded;
 
+    // Sliding / Ducking Mechanics
+    bool isSliding;
+    float slideTimer;
+    static constexpr float SLIDE_DURATION = 0.85f; // 0.85s slide duration
+    float slideVisualLean;                         // Dynamic backward pitch lean in degrees
+    float slideVisualDropY;                        // Dynamic vertical drop in meters
+
     // 3D Model & Skeletal Animations
     Model model;
     bool isModelLoaded;
@@ -40,6 +47,11 @@ struct PlayerCharacter {
     ModelAnimation* hangingAnimations;
     int hangingAnimsCount;
     float hangingAnimTime;
+
+    // Slide Animation for Sliding / Ducking
+    ModelAnimation* slideAnimations;
+    int slideAnimsCount;
+    float slideAnimTime;
 
     // Model transform tuning
     Vector3 modelScale;
@@ -300,6 +312,8 @@ struct TouchSteeringState {
     Vector2 currentPos = { 0.0f, 0.0f };
     float lateralInput = 0.0f;      // [-1.0f (Left), +1.0f (Right)]
     bool jumpTriggered = false;
+    bool slideTriggered = false;
+    bool swipeVerticalHandled = false; // Prevent repeated triggers from one continuous swipe
     bool tapRestartTriggered = false;
 };
 
@@ -311,7 +325,7 @@ float GetKeyboardSteering() {
     return steer;
 }
 
-// Touch lateral drag/hold steering: -1.0f (Left) to +1.0f (Right)
+// Touch lateral drag/hold steering + directional swipe gestures
 float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
     bool isDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || (GetTouchPointCount() > 0);
     bool isPressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
@@ -321,12 +335,14 @@ float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
     }
 
     touch.jumpTriggered = false;
+    touch.slideTriggered = false;
     touch.tapRestartTriggered = false;
 
     if (isPressed) {
         touch.isTouching = true;
         touch.touchStartPos = pos;
         touch.currentPos = pos;
+        touch.swipeVerticalHandled = false;
 
 #if defined(__EMSCRIPTEN__)
         // Trigger motion permission on user tap (for non-iOS or fallback)
@@ -335,19 +351,31 @@ float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
 
         if (isGameOver) {
             touch.tapRestartTriggered = true;
-        } else {
-            // Tap top 35% of screen to jump
-            if (pos.y < (float)GetScreenHeight() * 0.35f) {
-                touch.jumpTriggered = true;
-            }
         }
     }
 
     if (isDown && touch.isTouching) {
         touch.currentPos = pos;
         float deltaX = pos.x - touch.touchStartPos.x;
-        float dragThreshold = (float)GetScreenWidth() * 0.10f; // 10% screen width drag = full deflection
+        float deltaY = pos.y - touch.touchStartPos.y;
 
+        // Vertical Swipe Gesture Threshold (fmaxf(30.0f, screenHeight * 0.045f))
+        float verticalSwipeThreshold = fmaxf(30.0f, (float)GetScreenHeight() * 0.045f);
+
+        if (!isGameOver && !touch.swipeVerticalHandled) {
+            if (deltaY < -verticalSwipeThreshold) {
+                // Swipe UP (deltaY < -threshold) -> JUMP
+                touch.jumpTriggered = true;
+                touch.swipeVerticalHandled = true;
+            } else if (deltaY > verticalSwipeThreshold) {
+                // Swipe DOWN (deltaY > +threshold) -> SLIDE / DUCK
+                touch.slideTriggered = true;
+                touch.swipeVerticalHandled = true;
+            }
+        }
+
+        // Horizontal Drag Lateral Steering
+        float dragThreshold = (float)GetScreenWidth() * 0.10f; // 10% screen width drag = full deflection
         if (fabsf(deltaX) > 4.0f) {
             touch.lateralInput = Clamp(deltaX / dragThreshold, -1.0f, 1.0f);
         } else {
@@ -359,6 +387,7 @@ float UpdateTouchSteering(TouchSteeringState& touch, bool isGameOver) {
     } else {
         touch.isTouching = false;
         touch.lateralInput = 0.0f;
+        touch.swipeVerticalHandled = false;
     }
 
     return touch.lateralInput;
@@ -423,16 +452,23 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
     player.collisionRadius = 0.9f;
     player.verticalVelocity = 0.0f;
     player.isGrounded = true;
+    player.isSliding = false;
+    player.slideTimer = 0.0f;
+    player.slideVisualLean = 0.0f;
+    player.slideVisualDropY = 0.0f;
     player.isModelLoaded = false;
     player.animations = nullptr;
     player.animsCount = 0;
     player.hangingAnimations = nullptr;
     player.hangingAnimsCount = 0;
+    player.slideAnimations = nullptr;
+    player.slideAnimsCount = 0;
     player.runningAnimIndex = 0;
     player.idleAnimIndex = 0;
     player.currentAnimIndex = 0;
     player.animTime = 0.0f;
     player.hangingAnimTime = 0.0f;
+    player.slideAnimTime = 0.0f;
 
     player.modelScale = (Vector3){ 1.0f, 1.0f, 1.0f };
     player.rotationY = 0.0f; // Alignment angle so character faces +Z (away from camera)
@@ -502,6 +538,19 @@ bool InitPlayerCharacter(PlayerCharacter& player, const char* modelPath) {
         TraceLog(LOG_WARNING, "WARNING: Hanging animation file not found at: %s", hangingAnimPath);
     }
 
+    // Load separate Slide animation asset for Ground Sliding / Ducking
+    const char* slideAnimPath = "assets/player/Slide.glb";
+    if (FileExists(slideAnimPath)) {
+        player.slideAnimations = LoadModelAnimations(slideAnimPath, &player.slideAnimsCount);
+        TraceLog(LOG_INFO, "=== Loaded %d Slide Animations from %s ===", player.slideAnimsCount, slideAnimPath);
+        for (int i = 0; i < player.slideAnimsCount; i++) {
+            TraceLog(LOG_INFO, "Slide Animation [%d]: '%s' (%d frames, %d bones)",
+                     i, player.slideAnimations[i].name, player.slideAnimations[i].frameCount, player.slideAnimations[i].boneCount);
+        }
+    } else {
+        TraceLog(LOG_WARNING, "WARNING: Slide animation file not found at: %s", slideAnimPath);
+    }
+
     return true;
 }
 
@@ -516,8 +565,8 @@ void UnloadMountainValleySystem(MountainValleySystem& valley) {
     valley.isLoaded = false;
 }
 
-// Update Skeletal Model Animation Frame for running sprint, hanging loop, or holding pose
-void UpdatePlayerAnimation(PlayerCharacter& player, bool isRunning, bool isZiplining, float deltaTime) {
+// Update Skeletal Model Animation Frame for running sprint, hanging loop, slide duck, or holding pose
+void UpdatePlayerAnimation(PlayerCharacter& player, bool isRunning, bool isZiplining, bool isSliding, float deltaTime, float runSpeedScale = 1.0f) {
     if (!player.isModelLoaded) return;
 
     if (isZiplining) {
@@ -529,10 +578,26 @@ void UpdatePlayerAnimation(PlayerCharacter& player, bool isRunning, bool isZipli
             int currentFrame = (int)player.hangingAnimTime % anim.frameCount;
             UpdateModelAnimation(player.model, anim, currentFrame);
         }
+    } else if (isSliding) {
+        // Play dedicated 47-frame slide animation across the slide duration
+        if (player.slideAnimations != nullptr && player.slideAnimsCount > 0) {
+            ModelAnimation anim = player.slideAnimations[0];
+            float animSpeed = (float)anim.frameCount / PlayerCharacter::SLIDE_DURATION;
+            player.slideAnimTime += deltaTime * animSpeed;
+            int currentFrame = (int)player.slideAnimTime;
+            if (currentFrame >= anim.frameCount) currentFrame = anim.frameCount - 1;
+            UpdateModelAnimation(player.model, anim, currentFrame);
+        } else if (player.animations != nullptr && player.animsCount > 0) {
+            ModelAnimation anim = player.animations[player.runningAnimIndex];
+            player.animTime += deltaTime * 30.0f;
+            int currentFrame = (int)player.animTime % anim.frameCount;
+            UpdateModelAnimation(player.model, anim, currentFrame);
+        }
     } else if (isRunning) {
         if (player.animations != nullptr && player.animsCount > 0) {
             ModelAnimation anim = player.animations[player.runningAnimIndex];
-            const float animSpeed = 30.0f;
+            const float baseAnimFps = 30.0f;
+            float animSpeed = baseAnimFps * Clamp(runSpeedScale, 0.85f, 2.0f);
             player.animTime += deltaTime * animSpeed;
             int currentFrame = (int)player.animTime % anim.frameCount;
             UpdateModelAnimation(player.model, anim, currentFrame);
@@ -545,24 +610,44 @@ void UpdatePlayerAnimation(PlayerCharacter& player, bool isRunning, bool isZipli
     }
 }
 
-// Render Rigged 3D Humanoid Model
+// Render Rigged 3D Humanoid Model with Dynamic Sliding / Leaning Transforms
 void DrawPlayerCharacter(const PlayerCharacter& player) {
     if (!player.isModelLoaded) return;
 
     Vector3 drawPos = Vector3Add(player.position, player.drawOffset);
-    DrawModelEx(
-        player.model,
-        drawPos,
-        (Vector3){ 0.0f, 1.0f, 0.0f },
-        player.rotationY,
-        player.modelScale,
-        WHITE
-    );
+
+    // If procedural lean is active and no skeletal slide animation is loaded, apply procedural matrix
+    if ((player.slideAnimations == nullptr || player.slideAnimsCount == 0) &&
+        (fabsf(player.slideVisualLean) > 0.01f || fabsf(player.slideVisualDropY) > 0.001f)) {
+        drawPos.y += player.slideVisualDropY;
+
+        rlPushMatrix();
+            rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
+            rlRotatef(player.rotationY, 0.0f, 1.0f, 0.0f);
+            rlRotatef(player.slideVisualLean, 1.0f, 0.0f, 0.0f);
+            rlScalef(player.modelScale.x, player.modelScale.y, player.modelScale.z);
+            DrawModel(player.model, (Vector3){ 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+        rlPopMatrix();
+    } else {
+        DrawModelEx(
+            player.model,
+            drawPos,
+            (Vector3){ 0.0f, 1.0f, 0.0f },
+            player.rotationY,
+            player.modelScale,
+            WHITE
+        );
+    }
 }
 
 // Unload Model and Animations
 void UnloadPlayerCharacter(PlayerCharacter& player) {
     if (player.isModelLoaded) {
+        if (player.slideAnimations != nullptr && player.slideAnimsCount > 0) {
+            UnloadModelAnimations(player.slideAnimations, player.slideAnimsCount);
+            player.slideAnimations = nullptr;
+            player.slideAnimsCount = 0;
+        }
         if (player.hangingAnimations != nullptr && player.hangingAnimsCount > 0) {
             UnloadModelAnimations(player.hangingAnimations, player.hangingAnimsCount);
             player.hangingAnimations = nullptr;
@@ -918,13 +1003,12 @@ struct GameState {
     TouchSteeringState touch;
 
     // Forward Running Speed & Acceleration Tuning Constants
-    static constexpr float BASE_FORWARD_SPEED = 14.0f;       // Initial starting speed (m/s)
-    static constexpr float FORWARD_ACCELERATION = 0.25f;      // Smooth acceleration rate (m/s^2)
-    static constexpr float MAX_FORWARD_SPEED = 28.0f;         // Capped maximum running speed (m/s)
+    static constexpr float BASE_FORWARD_SPEED = 15.0f;       // Initial starting speed (m/s)
+    static constexpr float FORWARD_ACCELERATION = 0.8f;      // Smooth acceleration rate (m/s^2)
+    static constexpr float MAX_FORWARD_SPEED = 60.0f;         // Capped maximum running speed (m/s)
 
     // Zipline Route Tuning Constants
     static constexpr float ZIPLINE_LENGTH = 1037.0f;         // Total 3D diagonal cable length (m)
-    static constexpr float ZIPLINE_SPEED = 35.0f;           // Canyon gliding travel speed (m/s)
     static constexpr float ZIPLINE_GRAB_RADIUS = 4.0f;      // Airborne grab radius around cable start
     static constexpr float ZIPLINE_HEIGHT_START = 6.0f;     // Starting cable elevation (m)
     static constexpr float ZIPLINE_HEIGHT_END = -297.65f;   // Ending destination cable elevation (m)
@@ -938,6 +1022,7 @@ struct GameState {
     // Zipline Gameplay State
     bool isZiplining = false;
     float ziplineProgress = 0.0f; // 0.0f (start) -> 1.0f (destination)
+    float ziplineSpeed = BASE_FORWARD_SPEED; // Captured running speed at moment of grab
 
     float initialSpawnZ = 50.0f;
     float nextSpawnZ = 50.0f;
@@ -954,6 +1039,14 @@ struct GameState {
     bool isGameOver = false;
     Camera3D camera;
 
+    // Zipline Camera-Look State (Temple Run style subtle camera freedom)
+    float ziplineLookYaw = 0.0f;       // Current smoothed look yaw (-30° to +30°)
+    float ziplineLookPitch = 0.0f;     // Current smoothed look pitch (-15° to +15°)
+    float targetLookYaw = 0.0f;        // Target look yaw
+    float targetLookPitch = 0.0f;      // Target look pitch
+    Vector2 lastLookTouchPos = { 0.0f, 0.0f };
+    bool isLookDragging = false;
+
     // Diagnostics telemetry
     float lastKeyboardSteer = 0.0f;
     float lastTouchSteer = 0.0f;
@@ -966,10 +1059,22 @@ struct GameState {
         player.rotationY = 0.0f;
         player.verticalVelocity = 0.0f;
         player.isGrounded = true;
+        player.isSliding = false;
+        player.slideTimer = 0.0f;
+        player.slideAnimTime = 0.0f;
+        player.slideVisualLean = 0.0f;
+        player.slideVisualDropY = 0.0f;
         player.animTime = 0.0f;
         forwardSpeed = BASE_FORWARD_SPEED;
         isZiplining = false;
         ziplineProgress = 0.0f;
+        ziplineSpeed = BASE_FORWARD_SPEED;
+        ziplineLookYaw = 0.0f;
+        ziplineLookPitch = 0.0f;
+        targetLookYaw = 0.0f;
+        targetLookPitch = 0.0f;
+        lastLookTouchPos = (Vector2){ 0.0f, 0.0f };
+        isLookDragging = false;
         gyro.filteredInput = 0.0f;
         touch.lateralInput = 0.0f;
         lastKeyboardSteer = 0.0f;
@@ -1028,16 +1133,63 @@ void UpdateDrawFrame() {
         if (Vector3DistanceSqr(playerReach, cableStart) <= GameState::ZIPLINE_GRAB_RADIUS * GameState::ZIPLINE_GRAB_RADIUS) {
             g.isZiplining = true;
             g.ziplineProgress = 0.0f;
+            g.ziplineSpeed = g.forwardSpeed; // Zipline speed matches current running speed at moment of grab
             g.player.verticalVelocity = 0.0f;
             g.player.hangingAnimTime = 0.0f;
+            // Reset look offsets on zipline grab
+            g.targetLookYaw = 0.0f;
+            g.targetLookPitch = 0.0f;
+            g.ziplineLookYaw = 0.0f;
+            g.ziplineLookPitch = 0.0f;
+            g.isLookDragging = false;
         }
     }
 
     // --------------------------------------------------------------------------
-    // 2. Active Zipline Riding Simulation (~500m curved gliding ride)
+    // 2. Active Zipline Riding Simulation & Interactive Camera-Look Freedom
     // --------------------------------------------------------------------------
     if (g.isZiplining) {
-        float progressDelta = (GameState::ZIPLINE_SPEED / GameState::ZIPLINE_LENGTH) * deltaTime;
+        // --- Interactive Camera-Look Control via Touch Swipe & Mouse Drag ---
+        bool isDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || (GetTouchPointCount() > 0);
+        Vector2 touchPos = GetMousePosition();
+        if (GetTouchPointCount() > 0) {
+            touchPos = GetTouchPosition(0);
+        }
+
+        if (isDown) {
+            if (!g.isLookDragging) {
+                g.isLookDragging = true;
+                g.lastLookTouchPos = touchPos;
+            } else {
+                float deltaX = touchPos.x - g.lastLookTouchPos.x;
+                float deltaY = touchPos.y - g.lastLookTouchPos.y;
+                g.lastLookTouchPos = touchPos;
+
+                // Sensitivity constants (degrees per screen pixel)
+                const float SENSITIVITY_X = 0.14f;
+                const float SENSITIVITY_Y = 0.12f;
+
+                g.targetLookYaw   += deltaX * SENSITIVITY_X;
+                g.targetLookPitch -= deltaY * SENSITIVITY_Y; // Drag up -> pitch up (+), drag down -> pitch down (-)
+
+                // Clamp angles so camera cannot rotate completely around
+                g.targetLookYaw   = Clamp(g.targetLookYaw, -30.0f, 30.0f);
+                g.targetLookPitch = Clamp(g.targetLookPitch, -15.0f, 15.0f);
+            }
+        } else {
+            g.isLookDragging = false;
+            // Smoothly auto-recenter target towards forward view when released
+            g.targetLookYaw   = Lerp(g.targetLookYaw, 0.0f, Clamp(3.5f * deltaTime, 0.0f, 1.0f));
+            g.targetLookPitch = Lerp(g.targetLookPitch, 0.0f, Clamp(3.5f * deltaTime, 0.0f, 1.0f));
+        }
+
+        // Exponential smoothing filter for silky smooth camera look
+        float smoothRate = Clamp(9.0f * deltaTime, 0.0f, 1.0f);
+        g.ziplineLookYaw   = Lerp(g.ziplineLookYaw, g.targetLookYaw, smoothRate);
+        g.ziplineLookPitch = Lerp(g.ziplineLookPitch, g.targetLookPitch, smoothRate);
+
+        // --- Zipline Traversal & Position Updates ---
+        float progressDelta = (g.ziplineSpeed / GameState::ZIPLINE_LENGTH) * deltaTime;
         g.ziplineProgress += progressDelta;
 
         if (g.ziplineProgress >= 1.0f) {
@@ -1056,7 +1208,7 @@ void UpdateDrawFrame() {
             const float ZIPLINE_HANG_OFFSET_Y = 2.35f;
             g.player.position = (Vector3){ cablePos.x, cablePos.y - ZIPLINE_HANG_OFFSET_Y, cablePos.z };
 
-            // Rotate character to face forward along curved cable 3D tangent
+            // Rotate character to face forward along straight cable 3D tangent
             Vector3 tangent = GetZiplineTangent(g.ziplineProgress);
             float targetYaw = atan2f(tangent.x, tangent.z) * RAD2DEG;
             g.player.rotationY = targetYaw;
@@ -1064,6 +1216,14 @@ void UpdateDrawFrame() {
             g.player.isGrounded = false;
         }
     } else if (!g.isGameOver) {
+        // Smoothly decay look offsets to zero during ground running
+        float returnRate = Clamp(8.0f * deltaTime, 0.0f, 1.0f);
+        g.targetLookYaw   = 0.0f;
+        g.targetLookPitch = 0.0f;
+        g.ziplineLookYaw   = Lerp(g.ziplineLookYaw, 0.0f, returnRate);
+        g.ziplineLookPitch = Lerp(g.ziplineLookPitch, 0.0f, returnRate);
+        g.isLookDragging  = false;
+
         // ----------------------------------------------------------------------
         // 3. Normal Ground & Airborne Movement across all Road Routes
         // ----------------------------------------------------------------------
@@ -1182,11 +1342,39 @@ void UpdateDrawFrame() {
             g.player.isGrounded = false;
         }
 
-        // Vertical Jump Physics (SPACE Key or Touch Tap)
-        if (g.player.isGrounded && (IsKeyPressed(KEY_SPACE) || g.touch.jumpTriggered)) {
+        // Vertical Jump Physics (SPACE / UP / W or Mobile Swipe UP)
+        bool tryJump = (IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W) || g.touch.jumpTriggered);
+        if (g.player.isGrounded && tryJump) {
             g.player.verticalVelocity = g.jumpVelocity;
             g.player.isGrounded = false;
+            g.player.isSliding = false; // Jumping cancels ground slide immediately
+            g.player.slideTimer = 0.0f;
         }
+
+        // Slide / Duck Physics (DOWN / S or Mobile Swipe DOWN)
+        bool trySlide = (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S) || g.touch.slideTriggered);
+        if (g.player.isGrounded && !g.isZiplining && trySlide && !g.player.isSliding) {
+            g.player.isSliding = true;
+            g.player.slideTimer = 0.0f;
+            g.player.slideAnimTime = 0.0f;
+        }
+
+        // Active Slide Progression & Recovery
+        if (g.player.isSliding) {
+            g.player.slideTimer += deltaTime;
+            if (g.player.slideTimer >= PlayerCharacter::SLIDE_DURATION || !g.player.isGrounded) {
+                g.player.isSliding = false;
+                g.player.slideTimer = 0.0f;
+            }
+        }
+
+        // Smooth Slide Visual Pitch Lean & Vertical Drop Interpolation
+        float targetLean = g.player.isSliding ? -45.0f : 0.0f;
+        float targetDropY = g.player.isSliding ? -0.55f : 0.0f;
+        float slideLerp = Clamp(14.0f * deltaTime, 0.0f, 1.0f);
+        g.player.slideVisualLean = Lerp(g.player.slideVisualLean, targetLean, slideLerp);
+        g.player.slideVisualDropY = Lerp(g.player.slideVisualDropY, targetDropY, slideLerp);
+        g.player.collisionRadius = g.player.isSliding ? 0.45f : 0.9f;
 
         if (!g.player.isGrounded) {
             g.player.verticalVelocity += g.gravity * deltaTime;
@@ -1321,9 +1509,10 @@ void UpdateDrawFrame() {
         }
     }
 
-    // Update Skeletal Model Running or Hanging Animation across all gameplay states
+    // Update Skeletal Model Running, Sliding, or Hanging Animation across all gameplay states
     if (!g.isGameOver) {
-        UpdatePlayerAnimation(g.player, !g.isZiplining, g.isZiplining, deltaTime);
+        float speedScale = g.forwardSpeed / GameState::BASE_FORWARD_SPEED;
+        UpdatePlayerAnimation(g.player, !g.isZiplining && !g.player.isSliding, g.isZiplining, g.player.isSliding, deltaTime, speedScale);
     }
 
     // --------------------------------------------------------------------------
@@ -1338,10 +1527,30 @@ void UpdateDrawFrame() {
     bool isOnMainStraight = (!isOnDestinationRoad && !isOnSegment3 && !isOnTurnedLeftPath && !isOnTurnedRightPath);
 
     if (g.isZiplining) {
-        // High-angle sweeping camera during zipline glide
+        // High-angle sweeping camera during zipline glide with Temple Run style look freedom
         Vector3 tangent = GetZiplineTangent(g.ziplineProgress);
-        desiredCamPos = Vector3Add(g.player.position, (Vector3){ -tangent.x * 9.0f, 4.5f, -tangent.z * 9.0f });
-        desiredCamTarget = Vector3Add(g.player.position, (Vector3){ tangent.x * 6.5f, 1.2f, tangent.z * 6.5f });
+        Vector3 forwardH = Vector3Normalize((Vector3){ tangent.x, 0.0f, tangent.z });
+        Vector3 rightH   = (Vector3){ forwardH.z, 0.0f, -forwardH.x };
+
+        Vector3 baseCamPos    = Vector3Add(g.player.position, (Vector3){ -tangent.x * 9.0f, 4.5f, -tangent.z * 9.0f });
+        Vector3 baseCamTarget = Vector3Add(g.player.position, (Vector3){ tangent.x * 6.5f, 1.2f, tangent.z * 6.5f });
+
+        float yawRad   = g.ziplineLookYaw * (float)DEG2RAD;
+        float pitchRad = g.ziplineLookPitch * (float)DEG2RAD;
+
+        // Subtle position parallax
+        desiredCamPos = Vector3Subtract(baseCamPos, Vector3Scale(rightH, 2.0f * sinf(yawRad)));
+        desiredCamPos.y -= 1.2f * sinf(pitchRad);
+
+        // Smooth target rotation looking left/right and up/down
+        Vector3 lookOffset = Vector3Add(
+            Vector3Scale(rightH, 12.0f * sinf(yawRad)),
+            Vector3Add(
+                (Vector3){ 0.0f, 8.0f * sinf(pitchRad), 0.0f },
+                Vector3Scale(forwardH, 5.0f * (cosf(yawRad) - 1.0f))
+            )
+        );
+        desiredCamTarget = Vector3Add(baseCamTarget, lookOffset);
     } else if (isOnMainStraight) {
         desiredCamPos = (Vector3){ g.player.position.x, g.player.position.y + 4.0f, g.player.position.z - 8.0f };
         desiredCamTarget = (Vector3){ g.player.position.x, g.player.position.y + 1.0f, g.player.position.z + 8.0f };
@@ -1412,14 +1621,14 @@ void UpdateDrawFrame() {
         EndMode3D();
 
         // HUD Overlay
-        DrawRectangle(15, 15, 340, 222, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
-        DrawRectangleLines(15, 15, 340, 222, (Color){ 210, 150, 40, 255 });
+        DrawRectangle(15, 15, 340, 230, Fade((Color){ 15, 18, 30, 255 }, 0.85f));
+        DrawRectangleLines(15, 15, 340, 230, (Color){ 210, 150, 40, 255 });
 
         DrawText("TEMPLE RUNNER 3D", 30, 25, 20, (Color){ 240, 170, 50, 255 });
-        DrawText("A / D / Arrows : Move (Desktop)", 30, 50, 13, RAYWHITE);
-        DrawText("Touch / Drag   : Move (Mobile)", 30, 68, 13, RAYWHITE);
-        DrawText("Tilt Device    : Gyro Steering", 30, 86, 13, (Color){ 100, 240, 255, 255 });
-        DrawText("SPACE / Tap Top: Jump / Grab Zipline", 30, 104, 13, (Color){ 255, 215, 0, 255 });
+        DrawText("Desktop : A/D/Arrows (Move), Space/W (Jump), S (Slide)", 30, 50, 12, RAYWHITE);
+        DrawText("Mobile  : Drag (Move), Swipe Up (Jump), Swipe Down (Slide)", 30, 68, 12, RAYWHITE);
+        DrawText("Tilt    : Gyro Steering (Roll / Gamma)", 30, 86, 12, (Color){ 100, 240, 255, 255 });
+        DrawText("Zipline : Jump at cliff to Grab / Swipe for Look", 30, 104, 12, (Color){ 255, 215, 0, 255 });
 
         float currentDistance = 0.0f;
         if (g.isZiplining) {
@@ -1437,9 +1646,17 @@ void UpdateDrawFrame() {
         }
         DrawText(TextFormat("Distance: %.1f m", currentDistance), 30, 128, 16, YELLOW);
         DrawText(TextFormat("Coins: %d", g.score), 30, 150, 16, (Color){ 255, 215, 0, 255 });
-        const char* modeStr = g.isGameOver ? "GAME OVER" : (g.isZiplining ? "ZIPLINING" : TextFormat("%.1f m/s", g.forwardSpeed));
-        DrawText(TextFormat("Speed: %s", modeStr), 30, 172, 16, g.isGameOver ? RED : (g.isZiplining ? (Color){ 100, 240, 255, 255 } : GREEN));
-        DrawText(TextFormat("Player X: %.3f", g.player.position.x), 30, 194, 16, (Color){ 100, 230, 255, 255 });
+
+        // Prominent Real-Time Speed Display
+        if (g.isGameOver) {
+            DrawText("SPEED: GAME OVER", 30, 172, 16, RED);
+        } else if (g.isZiplining) {
+            DrawText(TextFormat("SPEED: ZIPLINING (%.1f m/s)", g.ziplineSpeed), 30, 172, 16, (Color){ 100, 240, 255, 255 });
+        } else {
+            Color speedCol = (g.forwardSpeed >= GameState::MAX_FORWARD_SPEED - 0.5f) ? (Color){ 255, 140, 60, 255 } : (Color){ 80, 255, 140, 255 };
+            DrawText(TextFormat("SPEED: %.1f m/s (Max: %.1f m/s)", g.forwardSpeed, GameState::MAX_FORWARD_SPEED), 30, 172, 16, speedCol);
+        }
+        DrawText(TextFormat("Player X: %.3f", g.player.position.x), 30, 196, 15, (Color){ 100, 230, 255, 255 });
 
         // ----------------------------------------------------------------------
         // Top-Right Live Elevation HUD Indicator Card
@@ -1460,7 +1677,7 @@ void UpdateDrawFrame() {
 
 #if defined(__EMSCRIPTEN__)
         // Motion / Gyro Diagnostic Overlay Panel (top-left below main HUD)
-        int diagY = 245;
+        int diagY = 255;
         int diagW = 345;
         int diagH = 175;
         DrawRectangle(15, diagY, diagW, diagH, Fade((Color){ 10, 15, 26, 255 }, 0.92f));
